@@ -8,22 +8,23 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from html import escape
 
 from norm_tasker import fmt
-from norm_tasker.config import Role
 from norm_tasker.digest.kp import kp_status
 from norm_tasker.digest.report import build_weekly_report
 from norm_tasker.digest.summary import build_summary, last_workday_of_week
 from norm_tasker.kp.models import KpParseResult
 from norm_tasker.reply import Button, Reply, claim_button, stage_button
-from norm_tasker.tracker.models import Actor, Post
+from norm_tasker.tracker.models import Post
 from norm_tasker.tracker.service import Tracker
 from norm_tasker.tracker.stages import Stage
 
+log = logging.getLogger(__name__)
 MAX_BUTTONS = 6
 
 
@@ -49,12 +50,7 @@ class Ctx:
         return self.tracker.team.mention_responsible()
 
     def mention_author(self, post: Post) -> str:
-        if not post.assigned:
-            return ""
-        actor = Actor(
-            post.assignee_id, post.assignee_name or "", post.assignee_username, Role.COPYWRITER
-        )
-        return self.tracker.team.mention(actor)
+        return self.tracker.team.mention_assignee(post)
 
 
 def _lines(posts: list[Post], *, authors: bool = False, ctx: Ctx | None = None) -> str:
@@ -380,7 +376,12 @@ def due_rules(
         if ctx.soft and rule.escalation:
             result.append((rule, None))
             continue
-        result.append((rule, rule.build(ctx)))
+        try:
+            result.append((rule, rule.build(ctx)))
+        except Exception:
+            # Ошибка в одном правиле не должна лишить команду остальных напоминаний.
+            log.exception("Правило %s не сработало", rule.id)
+            result.append((rule, None))
     return result
 
 

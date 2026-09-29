@@ -138,6 +138,9 @@ class Settings(Strict):
     extra_days_off: list[date] = []  # дополнительные нерабочие дни
     extra_workdays: list[date] = []  # рабочие дни, которых нет в производственном календаре
     weekend_reminders: bool = False  # писать ли в выходные
+    # Статусы КП → этапы (TAKEN, TEXT_SHOWN, TEXT_OK, AT_DESIGNER, DESIGN_READY, SHOWN_DESIGN,
+    # FINAL_OK, PUBLISHED). Дополняет и переопределяет стандартное соответствие.
+    kp_statuses: dict[str, str] = {}
 
     @field_validator("timezone", "designer_timezone")
     @classmethod
@@ -148,9 +151,28 @@ class Settings(Strict):
             raise ValueError(f"неизвестный часовой пояс {value!r}") from exc
         return value
 
+    @field_validator("kp_statuses")
+    @classmethod
+    def _known_stages(cls, value: dict[str, str]) -> dict[str, str]:
+        from norm_tasker.tracker.stages import Stage
+
+        for status, stage in value.items():
+            if stage.upper() not in Stage.__members__:
+                raise ValueError(f"статус «{status}»: неизвестный этап {stage!r}")
+        return value
+
     @property
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.timezone)
+
+    def status_stages(self) -> dict:
+        """Соответствие статусов КП этапам: стандартное плюс настройки из config.yaml."""
+        from norm_tasker.tracker.stages import DEFAULT_KP_STATUS_STAGES, Stage, normalize
+
+        mapping = dict(DEFAULT_KP_STATUS_STAGES)
+        for status, stage in self.kp_statuses.items():
+            mapping[normalize(status)] = Stage[stage.upper()]
+        return mapping
 
 
 @dataclass(frozen=True)

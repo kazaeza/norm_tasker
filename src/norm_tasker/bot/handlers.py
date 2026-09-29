@@ -1,0 +1,275 @@
+"""Обработчики Telegram: сообщения команды, команды бота, кнопки."""
+
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING
+
+from aiogram import Dispatcher, F, Router
+from aiogram.enums import ChatType
+from aiogram.exceptions import TelegramAPIError
+from aiogram.filters import Command, CommandObject
+from aiogram.types import CallbackQuery, ChatMemberUpdated, Message, User
+
+from norm_tasker.bot import views
+from norm_tasker.bot.telegram import message_link
+from norm_tasker.chat.actions import handle_callback, handle_message
+from norm_tasker.config import Role
+from norm_tasker.digest.board import build_board
+from norm_tasker.reply import Reply
+from norm_tasker.tracker.models import Actor
+
+if TYPE_CHECKING:
+    from norm_tasker.bot.app import App
+
+log = logging.getLogger(__name__)
+
+PRIVATE_START = (
+    "Привет! Я работаю в рабочем чате команды и пишу там, а здесь меня трогать не нужно.\n"
+    "Чтобы настроить меня, отправьте /id в рабочем чате и в личке — я покажу идентификаторы."
+)
+
+
+class Handlers:
+    def __init__(self, app: App) -> None:
+        self.app = app
+
+    # --- вспомогательное -----------------------------------------------------------------
+    @property
+    def tracker(self):
+        return self.app.tracker
+
+    @property
+    def sender(self):
+        return self.app.sender
+
+    def in_work_chat(self, chat_id: int) -> bool:
+        return self.app.settings.chat_id is not None and chat_id == self.app.settings.chat_id
+
+    def identify(self, user: User | None) -> Actor | None:
+        if user is None or user.is_bot:
+            return None
+        return self.tracker.team.identify(
+            user.id, user.username, user.full_name, self.tracker.now()
+        )
+
+    @staticmethod
+    def thread_of(message: Message) -> int | None:
+        return message.message_thread_id if message.is_topic_message else None
+
+    async def respond(self, message: Message, reply: Reply) -> None:
+        """Ответ на сообщение: реакция, текст или и то и другое."""
+        if reply.react:
+            reacted = await self.sender.react(message.chat.id, message.message_id)
+            if not reacted and reply.text is None:
+                reply = Reply("👍 Записал.", kind="reply")
+        if reply.text:
+            await self.sender.send(
+                reply,
+                reply_to=message.message_id,
+                chat_id=message.chat.id,
+                thread_id=self.thread_of(message),
+            )
+
+    # --- регистрация --------------------------------------------------------------------
+    def register(self, dp: Dispatcher) -> None:
+        anywhere = Router(name="anywhere")
+        anywhere.message.register(self.cmd_id, Command("id"))
+        anywhere.message.register(
+            self.cmd_start_private, Command("start", "help"), F.chat.type == ChatType.PRIVATE
+        )
+
+        work = Router(name="work_chat")
+        work.message.filter(lambda message: self.in_work_chat(message.chat.id))
+        work.callback_query.filter(
+            lambda query: (
+                isinstance(query.message, Message) and self.in_work_chat(query.message.chat.id)
+            )
+        )
+        work.message.register(self.cmd_help, Command("help", "start"))
+        work.message.register(self.cmd_today, Command("today"))
+        work.message.register(self.cmd_week, Command("week"))
+        work.message.register(self.cmd_my, Command("my"))
+        work.message.register(self.cmd_free, Command("free"))
+        work.message.register(self.cmd_design, Command("design"))
+        work.message.register(self.cmd_kp, Command("kp"))
+        work.message.register(self.cmd_post, Command("post"))
+        work.message.register(self.cmd_add, Command("add"))
+        work.message.register(self.cmd_board, Command("board"))
+        work.message.register(self.cmd_undo, Command("undo"))
+        work.message.register(self.cmd_inventory, Command("inventory"))
+        work.message.register(self.cmd_status, Command("status"))
+        work.message.register(self.on_text, F.text | F.caption)
+        work.callback_query.register(self.on_callback)
+
+        dp.include_router(anywhere)
+        dp.include_router(work)
+        dp.my_chat_member.register(self.on_my_chat_member)
+
+    # --- команды ----------------------------------------------------------------------------
+    async def cmd_id(self, message: Message) -> None:
+        user = message.from_user
+        actor = self.identify(user)
+        text = views.id_text(
+            message.chat.id,
+            self.thread_of(message),
+            user.id if user else None,
+            user.username if user else None,
+            actor,
+        )
+        await self.sender.send(
+            Reply(text), reply_to=message.message_id, chat_id=message.chat.id,
+            thread_id=self.thread_of(message),
+        )  # fmt: skip
+
+    async def cmd_start_private(self, message: Message) -> None:
+        await self.sender.send(Reply(PRIVATE_START), chat_id=message.chat.id, thread_id=None)
+
+    async def cmd_help(self, message: Message) -> None:
+        await self.respond(message, views.help_reply())
+
+    async def cmd_today(self, message: Message) -> None:
+        await self.respond(message, views.today_view(self.tracker, self.app.parsed_kp))
+
+    async def cmd_week(self, message: Message) -> None:
+        await self.respond(message, views.week_view(self.tracker, self.app.parsed_kp))
+
+    async def cmd_my(self, message: Message) -> None:
+        actor = self.identify(message.from_user)
+        if actor is not None:
+            await self.respond(message, views.my_view(self.tracker, actor))
+
+    async def cmd_free(self, message: Message) -> None:
+        await self.respond(message, views.free_view(self.tracker))
+
+    async def cmd_design(self, message: Message) -> None:
+        await self.respond(message, views.design_view(self.tracker))
+
+    async def cmd_kp(self, message: Message) -> None:
+        await self.respond(message, views.kp_view(self.tracker, self.app.parsed_kp))
+
+    async def cmd_post(self, message: Message, command: CommandObject) -> None:
+        query = (command.args or "").strip()
+        if not query:
+            await self.respond(message, Reply("Укажите пост: /post 12 или /post 16.10"))
+            return
+        posts = views.find_posts(self.tracker, query)
+        if not posts:
+            await self.respond(message, Reply("Не нашёл такой пост. Посты недели — /week."))
+            return
+        text = "\n\n———\n\n".join(views.post_view(self.tracker, p) for p in posts)
+        await self.respond(message, Reply(text, post_ids=[p.id for p in posts], kind="confirm"))
+
+    async def cmd_add(self, message: Message, command: CommandObject) -> None:
+        actor = self.identify(message.from_user)
+        if actor is None or actor.role == Role.BOSS:
+            return
+        await self.respond(
+            message, views.add_post_from_text(self.tracker, actor, command.args or "")
+        )
+        self.app.mark_dirty()
+
+    async def cmd_undo(self, message: Message) -> None:
+        actor = self.identify(message.from_user)
+        if actor is None:
+            return
+        entry = self.tracker.last_undoable(actor)
+        if entry is None:
+            await self.respond(
+                message, Reply("Нечего отменять: за последние сутки от вас действий нет.")
+            )
+            return
+        result = handle_callback(self.tracker, f"undo:{entry.id}", actor)
+        await self.respond(
+            message, Reply(result.edit_text or result.alert or "Не получилось отменить.")
+        )
+        self.app.mark_dirty()
+
+    async def cmd_inventory(self, message: Message) -> None:
+        actor = self.identify(message.from_user)
+        if actor is None or actor.role != Role.RESPONSIBLE:
+            await self.respond(message, Reply("Инвентаризацию запускает ответственный за проект."))
+            return
+        await self.respond(message, views.inventory_view(self.tracker))
+
+    async def cmd_status(self, message: Message) -> None:
+        await self.respond(
+            message,
+            views.status_view(self.tracker, self.app.info, self.app.settings.chat_id is not None),
+        )
+
+    async def cmd_board(self, message: Message) -> None:
+        await self.app.publish_board(message.chat.id, self.thread_of(message), message.message_id)
+
+    # --- сообщения команды ---------------------------------------------------------------------
+    async def on_text(self, message: Message) -> None:
+        actor = self.identify(message.from_user)
+        if actor is None:
+            return
+        text = message.text or message.caption or ""
+        reply_post_ids = None
+        replied = message.reply_to_message
+        if (
+            replied is not None
+            and replied.from_user is not None
+            and replied.from_user.id == self.app.bot_id
+        ):
+            reply_post_ids = self.tracker.state.message_posts(message.chat.id, replied.message_id)
+        try:
+            reply = handle_message(
+                self.tracker,
+                text,
+                actor,
+                reply_post_ids=reply_post_ids,
+                msg_link=message_link(message.chat.id, message.message_id),
+                parsed_kp=self.app.parsed_kp,
+            )
+        except Exception:
+            log.exception("Не удалось обработать сообщение %s", message.message_id)
+            return
+        if reply is None or reply.is_empty():
+            return
+        await self.respond(message, reply)
+        self.app.mark_dirty()
+
+    # --- кнопки --------------------------------------------------------------------------------
+    async def on_callback(self, query: CallbackQuery) -> None:
+        actor = self.identify(query.from_user)
+        if actor is None:
+            await query.answer("Вас нет в списке команды", show_alert=True)
+            return
+        message = query.message if isinstance(query.message, Message) else None
+        try:
+            result = handle_callback(
+                self.tracker, query.data or "", actor, parsed_kp=self.app.parsed_kp
+            )
+        except Exception:
+            log.exception("Не удалось обработать кнопку %s", query.data)
+            await query.answer("Что-то пошло не так, попробуйте ещё раз", show_alert=True)
+            return
+        try:
+            await query.answer(result.alert or None, show_alert=bool(result.alert))
+        except TelegramAPIError:
+            log.info("Уведомление о нажатии не доставлено", exc_info=True)
+        if message is not None:
+            if result.edit_text is not None:
+                await self.sender.edit(message.chat.id, message.message_id, result.edit_text)
+            elif result.remove_buttons:
+                await self.sender.remove_buttons(message.chat.id, message.message_id)
+            if result.reply is not None and not result.reply.is_empty():
+                result.reply.react = False  # реакция на сообщение бота с кнопкой бессмысленна
+                await self.respond(message, result.reply)
+        self.app.mark_dirty()
+
+    async def on_my_chat_member(self, event: ChatMemberUpdated) -> None:
+        log.info(
+            "Статус бота в чате %s изменился: %s → %s",
+            event.chat.id,
+            event.old_chat_member.status,
+            event.new_chat_member.status,
+        )
+        if event.chat.id == self.app.settings.chat_id:
+            await self.app.check_rights()
+
+    def board_text(self) -> str:
+        return build_board(self.tracker, self.tracker.now(), self.app.parsed_kp)

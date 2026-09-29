@@ -6,7 +6,7 @@ from datetime import datetime
 from html import escape
 
 from norm_tasker.config import Member, Role, Settings
-from norm_tasker.tracker.models import Actor
+from norm_tasker.tracker.models import Actor, Post
 from norm_tasker.tracker.state import State
 
 
@@ -84,6 +84,16 @@ class Team:
         if who.id is not None:
             return f'<a href="tg://user?id={who.id}">{escape(who.name)}</a>'
         return escape(who.name)
+
+    def mention_assignee(self, post: Post) -> str:
+        """Упоминание автора поста; пустая строка, если поста никто не взял."""
+        if not post.assigned:
+            return ""
+        return self.mention(
+            Actor(
+                post.assignee_id, post.assignee_name or "", post.assignee_username, Role.COPYWRITER
+            )
+        )
 
     def mention_responsible(self) -> str:
         return self.mention(self.responsible())
