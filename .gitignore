@@ -1,0 +1,22 @@
+# Секреты и данные конкретной установки — только на сервере, в репозиторий не попадают
+.env
+config.yaml
+data/
+*.db
+*.db-journal
+*.sqlite*
+service-account*.json
+credentials*.json
+
+# Выгрузки контент-плана содержат данные клиента
+*.xlsx
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
