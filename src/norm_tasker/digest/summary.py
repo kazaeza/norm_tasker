@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta
 from html import escape
 
 from norm_tasker import fmt
+from norm_tasker.config import Role
 from norm_tasker.digest.issues import Issue, issues_for
 from norm_tasker.digest.kp import kp_status, summary_line
 from norm_tasker.kp.models import KpParseResult
@@ -35,18 +36,10 @@ def last_workday_of_week(tracker: Tracker, day: date) -> bool:
     return calendar.next_workday(day).isocalendar()[:2] != day.isocalendar()[:2]
 
 
-def issue_line(tracker: Tracker, issue: Issue, *, tag: bool) -> str:
+def issue_line(issue: Issue) -> str:
     post = issue.post
     who = f" ({escape(post.assignee_name)})" if post.assignee_name else ""
-    line = f"• {fmt.wd_date(post.publish_date)} {fmt.label(post)}{who} — {issue.text}"
-    if (
-        tag
-        and issue.level == "red"
-        and issue.role is not None
-        and issue.role.value == "responsible"
-    ):
-        line += f" {tracker.team.mention_responsible()}"
-    return line
+    return f"• {fmt.wd_date(post.publish_date)} {fmt.label(post)}{who} — {issue.text}"
 
 
 def _capped(lines: list[str]) -> list[str]:
@@ -142,10 +135,15 @@ def build_summary(
     tag = not soft
 
     sections: list[str] = []
-    red = [issue_line(tracker, i, tag=tag) for i in issues if i.level == "red"]
-    yellow = [issue_line(tracker, i, tag=tag) for i in issues if i.level == "yellow"]
+    red_issues = [i for i in issues if i.level == "red"]
+    red = [issue_line(i) for i in red_issues]
+    yellow = [issue_line(i) for i in issues if i.level == "yellow"]
     if red:
-        sections.append("🔴 Горит\n" + "\n".join(_capped(red)))
+        block = "🔴 Горит\n" + "\n".join(_capped(red))
+        needs_lead = any(i.role == Role.RESPONSIBLE for i in red_issues)
+        if tag and needs_lead and tracker.team.mention_responsible():
+            block += f"\n{tracker.team.mention_responsible()}"
+        sections.append(block)
     if yellow:
         sections.append("🟡 Сегодня и скоро\n" + "\n".join(_capped(yellow)))
 

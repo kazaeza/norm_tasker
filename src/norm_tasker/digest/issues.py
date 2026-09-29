@@ -18,6 +18,10 @@ from norm_tasker.tracker.service import Tracker
 from norm_tasker.tracker.stages import LABEL, Stage
 
 Level = Literal["red", "yellow"]
+# Проблемы «никто не взял / не успевает», к которым важно добавить, что и темы ещё нет.
+NO_TOPIC_CODES = {
+    "take_due", "take_late", "text_no_owner", "text_due", "text_late", "show_blocked",
+}  # fmt: skip
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,8 @@ def post_issue(tracker: Tracker, post: Post, now: datetime) -> Issue | None:
     owner = post.assigned
 
     def issue(code: str, level: Level, text: str, role: Role | None = None) -> Issue:
+        if post.topic is None and code in NO_TOPIC_CODES:
+            text += "; темы в КП ещё нет"
         return Issue(post, code, level, text, role)
 
     # Дата выхода прошла, а «вышел» не отмечено.

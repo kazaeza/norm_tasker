@@ -442,3 +442,26 @@ def test_mentions_and_name_search(tracker, lead):
     assert tracker.team.find("@cw_beta").name == "Копирайтер Бета"
     assert tracker.team.find("Ответственный").username == "lead_user"
     assert tracker.team.responsible().username == "lead_user"
+
+
+def test_second_post_follows_the_published_first_post(tracker):
+    day = date(2026, 9, 28)
+    sync_kp(
+        tracker,
+        [
+            make_slot(day, topic="Основной пост дня", status="Выпущено"),
+            make_slot(day, slot=2, topic="Второй пост дня без статуса в КП"),
+        ],
+    )
+    first, second = tracker._select()
+    assert first.stage == Stage.PUBLISHED and second.stage == Stage.PUBLISHED
+    # Если основной пост ещё не вышел, второй не трогаем.
+    other = date(2026, 10, 6)
+    sync_kp(
+        tracker,
+        [
+            make_slot(other, topic="Основной"),
+            make_slot(other, slot=2, topic="Второй пост вторника"),
+        ],
+    )
+    assert all(p.stage == Stage.NEW for p in tracker.posts_on(other))

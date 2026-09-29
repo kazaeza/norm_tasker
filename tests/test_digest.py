@@ -423,3 +423,32 @@ def test_weekly_report_metrics(started, board, alpha, lead, clock):
 
 def test_weekly_report_without_posts(tracker):
     assert build_weekly_report(tracker, tracker.now()) is None
+
+
+# --- уточнения по итогам прогона на реальном КП ---------------------------------------------
+
+
+def test_topicless_posts_are_labelled_and_explained(tracker, board, clock):
+    from norm_tasker import fmt
+
+    assert fmt.label(tracker.get(board[THU].id)) == f"№{board[THU].id} (тема не выбрана)"
+    assert "темы в КП ещё нет" in issue_of(tracker, board[THU]).text
+    assert "темы в КП ещё нет" not in issue_of(tracker, board[FRI]).text  # тема у поста есть
+
+
+def test_summary_tags_the_responsible_once(tracker, board, clock):
+    clock.set(2026, 9, 29, 11, 30)
+    text = build_summary(tracker, tracker.now())[0].text
+    assert text.count("@lead_user") == 1
+    red_block = text.split("🔴 Горит\n")[1].split("\n\n")[0]
+    assert red_block.splitlines()[-1] == "@lead_user"
+
+
+def test_board_labels_authors_by_stage(tracker, board, lead):
+    tracker.set_stage(board[FRI].id, Stage.SHOWN_DESIGN, lead)  # этап есть, автора не отмечали
+    text = build_board(tracker, tracker.now())
+    line = next(x for x in text.splitlines() if f"№{board[FRI].id} " in x)
+    assert "— автор не отмечен" in line and line.endswith("🟡")  # и просим отметить автора
+    published = next(x for x in text.splitlines() if x.startswith("🚀"))
+    assert "свободен" not in published and "автор" not in published
+    assert f"№{board[THU].id} (тема не выбрана) — свободен" in text

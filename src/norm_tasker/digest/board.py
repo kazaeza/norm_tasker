@@ -20,12 +20,19 @@ LEGEND = (
 )
 
 
+def _who(post: Post) -> str:
+    if post.assignee_name:
+        return f" — {escape(post.assignee_name)}"
+    if post.stage >= Stage.PUBLISHED:
+        return ""
+    return " — автор не отмечен" if post.stage > Stage.NEW else " — свободен"
+
+
 def _line(post: Post, mark: str) -> str:
-    who = escape(post.assignee_name) if post.assignee_name else "свободен"
     slot = " (2-й)" if post.slot > 1 else ""
     return (
         f"{EMOJI[post.stage]} {fmt.wd_date(post.publish_date)}{slot} №{post.id} "
-        f"«{fmt.topic(post, 45)}» — {who}{mark}"
+        f"{fmt.quoted(post, 45)}{_who(post)}{mark}"
     )
 
 

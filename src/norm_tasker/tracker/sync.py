@@ -176,8 +176,27 @@ def sync_kp(
             report.slot_to_post[slot.key] = created.id
 
         _handle_vanished(tracker, unmatched_posts, candidates, matchable, report)
+        _publish_second_posts(tracker)
 
     return report
+
+
+def _publish_second_posts(tracker: Tracker) -> None:
+    """У второго поста дня в КП нет статуса: если основной вышел, считаем, что вышел и второй."""
+    now = tracker.now()
+    for post in tracker._select(
+        "cancelled = 0 AND slot > 1 AND source = 'kp' AND stage < ?", (int(Stage.PUBLISHED),)
+    ):
+        first = [p for p in tracker.posts_on(post.publish_date) if p.slot == 1]
+        if first and first[0].kp_stage_seen == int(Stage.PUBLISHED):
+            tracker._apply(
+                post.id,
+                {"stage": Stage.PUBLISHED, "stage_at": now},
+                kind="kp_sync",
+                actor=None,
+                source="kp",
+                undoable=False,
+            )
 
 
 def _handle_vanished(

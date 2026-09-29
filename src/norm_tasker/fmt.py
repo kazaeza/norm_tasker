@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from html import escape
 
-from norm_tasker.tracker.models import Post
+from norm_tasker.tracker.models import NO_TOPIC, Post
 from norm_tasker.tracker.stages import EMOJI, LABEL, Stage
 
 WEEKDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
@@ -46,9 +46,14 @@ def topic(post: Post, limit: int = 60) -> str:
     return escape(clip(post.title, limit))
 
 
+def quoted(post: Post, limit: int = 60) -> str:
+    """«Тема» или (тема не выбрана)"""
+    return f"«{topic(post, limit)}»" if post.topic else f"({NO_TOPIC})"
+
+
 def label(post: Post, limit: int = 60) -> str:
     """№12 «Тема»"""
-    return f"№{post.id} «{topic(post, limit)}»"
+    return f"№{post.id} {quoted(post, limit)}"
 
 
 def line(post: Post, limit: int = 60) -> str:
