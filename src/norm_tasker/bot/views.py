@@ -141,8 +141,10 @@ def kp_view(tracker: Tracker, parsed: KpParseResult | None) -> Reply:
     else:
         lines.append(f"\nТемы есть у {status.filled} из {status.total} рабочих дней.")
         with_topic = {s.date for s in parsed.slots if s.slot == 1 and s.topic}
-        day = timeline.month - timedelta(days=timeline.month.weekday())
-        while day.month <= timeline.month.month and day.year <= timeline.month.year:
+        first = timeline.month
+        last = (first + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+        day = first - timedelta(days=first.weekday())
+        while day <= last:
             week = [day + timedelta(days=i) for i in range(5)]
             inside = [d for d in week if d.month == timeline.month.month]
             if inside:

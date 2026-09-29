@@ -452,3 +452,21 @@ def test_board_labels_authors_by_stage(tracker, board, lead):
     published = next(x for x in text.splitlines() if x.startswith("🚀"))
     assert "свободен" not in published and "автор" not in published
     assert f"№{board[THU].id} (тема не выбрана) — свободен" in text
+
+
+def test_kp_view_by_weeks_including_january(tracker, clock):
+    from norm_tasker.bot.views import kp_view
+
+    clock.set(2026, 12, 22, 10)  # КП на январь: старт пн 21.12, ок чт 24.12, показ пт 25.12
+    days = [date(2027, 1, d) for d in (4, 5, 6, 12)]
+    january = KpParseResult(
+        slots=[make_slot(d, topic="Тема") for d in days],
+        sheets=[SheetInfo("Январь 2027", date(2027, 1, 1), False, 5, 5)],
+    )
+    text = kp_view(tracker, january).text
+    assert "КП на январь" in text and "Старт сборки: пн 21.12" in text
+    assert "Показ клиенту: пт 25.12" in text
+    assert "• 28.12–01.01: 0 из 1" in text  # неделя на стыке месяцев считает только январские дни
+    assert "• 04.01–08.01: 3 из 5" in text and "• 11.01–15.01: 1 из 5" in text
+    assert "• 25.01–29.01: 0 из 5" in text
+    assert "Темы есть у 4 из 21 рабочих дней" in text
