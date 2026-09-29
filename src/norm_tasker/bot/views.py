@@ -322,6 +322,8 @@ def status_view(tracker: Tracker, info: RuntimeInfo, chat_ok: bool) -> Reply:
         lines.append(f"Копия трекера в Google-таблице: {stamp}")
         if info.last_tracker_copy_error:
             lines.append(f"⚠️ Ошибка записи копии: {escape(info.last_tracker_copy_error)}")
+    if info.google_configured and not info.tracker_copy_configured:
+        lines.append("Без ключа Google: нет комментариев клиента к КП и докам и копии трекера")
     if soft_mode(tracker, now):
         started = tracker.state.get_meta("first_run")
         lines.append(f"Мягкий старт: только саммари и доска (с {started or 'первого запуска'})")

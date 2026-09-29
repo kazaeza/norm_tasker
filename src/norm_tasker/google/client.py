@@ -157,3 +157,29 @@ def comment_from_drive(file_id: str, item: dict[str, Any]) -> list[ExternalComme
         if (reply.get("content") or "").strip():
             result.append(make(f"{item['id']}:{reply['id']}", reply))
     return result
+
+
+class PublicSheet:
+    """КП без ключа Google: работает, если файл открыт «всем, у кого есть ссылка».
+
+    В такой выгрузке нет комментариев к ячейкам; посты, статусы и ссылки на доки есть.
+    """
+
+    def __init__(self, session: Any = None) -> None:
+        if session is None:
+            import requests
+
+            session = requests.Session()
+        self.session = session
+
+    def export_xlsx(self, file_id: str) -> bytes:
+        url = f"https://docs.google.com/spreadsheets/d/{quote(file_id)}/export?format=xlsx"
+        response = self.session.get(url, timeout=TIMEOUT, allow_redirects=True)
+        content_type = response.headers.get("content-type", "")
+        if response.status_code != 200 or "spreadsheetml" not in content_type:
+            raise GoogleError(
+                response.status_code,
+                "таблица не отдаётся без входа: откройте доступ «Все, у кого есть ссылка» "
+                "(хотя бы на просмотр) или подключите ключ сервисного аккаунта",
+            )
+        return response.content

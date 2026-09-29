@@ -12,7 +12,7 @@ from norm_tasker.calendar_ru import build_calendar
 from norm_tasker.config import Env, Role, Settings
 from norm_tasker.deadlines import kp_timeline, next_month
 from norm_tasker.fmt import wd_date
-from norm_tasker.google.client import GoogleClient, GoogleError
+from norm_tasker.google.client import GoogleClient, GoogleError, PublicSheet
 from norm_tasker.kp.parser import parse_kp
 
 OK, BAD, WARN = "✅", "❌", "⚠️ "
@@ -109,25 +109,27 @@ def check_team(settings: Settings, report: Report) -> None:
 
 
 def check_google(env: Env, settings: Settings, report: Report) -> None:
-    if not env.google_credentials or not env.google_credentials.exists():
-        report.bad(
-            "Ключ сервисного аккаунта не найден (GOOGLE_APPLICATION_CREDENTIALS)",
-            "создайте ключ в Google Cloud и положите файл в data/service-account.json",
+    has_key = bool(env.google_credentials and env.google_credentials.exists())
+    client: GoogleClient | PublicSheet
+    if has_key:
+        try:
+            client = GoogleClient.from_service_account(env.google_credentials)
+        except Exception as error:
+            report.bad(f"Ключ сервисного аккаунта не читается: {error}")
+            return
+        report.ok(f"Сервисный аккаунт: {client.service_account_email}")
+    else:
+        client = PublicSheet()
+        report.warn(
+            "Ключа сервисного аккаунта нет: КП читается по публичной ссылке",
+            "работает, но без комментариев клиента к ячейкам КП, без комментариев в доках и без "
+            "копии трекера; ключ можно добавить позже",
         )
-        return
-    try:
-        client = GoogleClient.from_service_account(env.google_credentials)
-    except Exception as error:
-        report.bad(f"Ключ сервисного аккаунта не читается: {error}")
-        return
-    report.ok(f"Сервисный аккаунт: {client.service_account_email}")
 
     if not env.kp_spreadsheet_id:
         report.bad("KP_SPREADSHEET_ID не задан", "id — часть ссылки на КП между /d/ и /edit")
     else:
         try:
-            info = client.file_info(env.kp_spreadsheet_id)
-            report.ok(f"КП доступно: «{info.get('name')}», изменялось {info.get('modifiedTime')}")
             data = client.export_xlsx(env.kp_spreadsheet_id)
             today = datetime.now(settings.tz).date()
             parsed = parse_kp(
@@ -138,8 +140,8 @@ def check_google(env: Env, settings: Settings, report: Report) -> None:
             window = [s for s in parsed.slots if today <= s.date <= today + timedelta(days=14)]
             comments = sum(1 for c in parsed.comments if c.day)
             report.ok(
-                f"Выгрузка КП разобрана: листов {len(parsed.sheets)}, постов на две недели вперёд "
-                f"{len(window)}, комментариев в календаре {comments}"
+                f"КП доступно и разобрано: листов {len(parsed.sheets)}, постов на две недели "
+                f"вперёд {len(window)}, комментариев в календаре {comments}"
             )
             for warning in parsed.warnings:
                 report.warn(warning)
@@ -150,12 +152,7 @@ def check_google(env: Env, settings: Settings, report: Report) -> None:
         except Exception as error:
             report.bad(f"Выгрузка КП не разобрана: {type(error).__name__}: {error}")
 
-    if not env.tracker_spreadsheet_id:
-        report.warn(
-            "TRACKER_SPREADSHEET_ID не задан",
-            "копия трекера в Google-таблице не будет вестись — бот работает и без неё",
-        )
-    else:
+    if has_key and env.tracker_spreadsheet_id and isinstance(client, GoogleClient):
         try:
             info = client.file_info(env.tracker_spreadsheet_id)
             if (info.get("capabilities") or {}).get("canEdit"):

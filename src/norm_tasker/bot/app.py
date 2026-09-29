@@ -24,7 +24,7 @@ from norm_tasker.calendar_ru import build_calendar, refresh_calendar
 from norm_tasker.config import Env, Settings
 from norm_tasker.digest.board import build_board
 from norm_tasker.digest.reminders import due_rules, mark_done
-from norm_tasker.google.client import GoogleClient, GoogleError
+from norm_tasker.google.client import GoogleClient, GoogleError, PublicSheet
 from norm_tasker.google.tracker_sheet import push_rows, rows_for
 from norm_tasker.kp.parser import parse_kp
 from norm_tasker.reply import Reply
@@ -46,6 +46,10 @@ KP_FAILURES_BEFORE_ALERT = 6
 FIRST_SYNC_WAIT_MINUTES = 5
 
 
+def self_kp_ok(client: Any, env: Env) -> bool:
+    return client is not None and bool(env.kp_spreadsheet_id)
+
+
 class App:
     def __init__(
         self,
@@ -54,15 +58,17 @@ class App:
         bot: Bot,
         tracker: Tracker,
         google: GoogleClient | None = None,
+        kp_client: Any = None,
     ) -> None:
         self.env = env
         self.settings = settings
         self.bot = bot
         self.tracker = tracker
         self.google = google
+        self.kp_client = kp_client or google  # откуда брать КП: с ключом или по публичной ссылке
         self.sender = Sender(bot, tracker, settings)
         self.info = RuntimeInfo(
-            google_configured=google is not None and bool(env.kp_spreadsheet_id),
+            google_configured=self_kp_ok(kp_client or google, env),
             tracker_copy_configured=google is not None and bool(env.tracker_spreadsheet_id),
         )
         self.parsed_kp = None
@@ -184,10 +190,10 @@ class App:
 
     # --- КП -------------------------------------------------------------------------------------
     async def sync_kp_once(self) -> None:
-        if self.google is None or not self.env.kp_spreadsheet_id:
+        if self.kp_client is None or not self.env.kp_spreadsheet_id:
             return
         try:
-            data = await asyncio.to_thread(self.google.export_xlsx, self.env.kp_spreadsheet_id)
+            data = await asyncio.to_thread(self.kp_client.export_xlsx, self.env.kp_spreadsheet_id)
             await self.apply_kp_data(data)
         except GoogleError as error:
             await self._kp_failed(str(error))
@@ -419,9 +425,14 @@ def build_app(env: Env, settings: Settings) -> App:
     )
     tracker = Tracker(Database(env.db_path), settings, calendar)
     google = None
+    kp_client = None
     if env.google_credentials and env.google_credentials.exists():
         google = GoogleClient.from_service_account(env.google_credentials)
     else:
-        log.warning("Ключ сервисного аккаунта не найден: КП читаться не будет")
+        log.warning(
+            "Ключа сервисного аккаунта нет: КП читается по публичной ссылке, без комментариев "
+            "к ячейкам, комментарии в доках и копия трекера отключены"
+        )
+        kp_client = PublicSheet()
     bot = Bot(env.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    return App(env, settings, bot, tracker, google)
+    return App(env, settings, bot, tracker, google, kp_client)

@@ -158,3 +158,31 @@ def test_rows_mark_posts_missing_from_kp(tracker, board):
     )
     row = next(r for r in rows_for(tracker, tracker.now()) if r[0] == str(board[FRI].id))
     assert row[10] == "нет в КП"
+
+
+def test_public_sheet_export_needs_no_key():
+    from norm_tasker.google.client import PublicSheet
+
+    class Session:
+        def __init__(self, status, ctype):
+            self.status, self.ctype = status, ctype
+
+        def get(self, url, timeout=None, allow_redirects=True):
+            self.url = url
+            return type(
+                "R",
+                (),
+                {
+                    "status_code": self.status,
+                    "headers": {"content-type": self.ctype},
+                    "content": b"xlsx",
+                },
+            )()
+
+    ok = Session(200, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    assert PublicSheet(ok).export_xlsx("ID1") == b"xlsx" and ok.url.endswith(
+        "/d/ID1/export?format=xlsx"
+    )
+    # Закрытая таблица отдаёт страницу входа (html) — объясняем, что делать.
+    with pytest.raises(GoogleError, match="Все, у кого есть ссылка"):
+        PublicSheet(Session(200, "text/html")).export_xlsx("ID1")
