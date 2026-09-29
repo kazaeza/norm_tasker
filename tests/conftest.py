@@ -11,6 +11,7 @@ from norm_tasker.kp.models import KpSlot
 from norm_tasker.tracker.db import Database
 from norm_tasker.tracker.models import Actor
 from norm_tasker.tracker.service import Tracker
+from norm_tasker.tracker.sync import sync_kp
 
 MSK = ZoneInfo("Europe/Moscow")
 
@@ -98,3 +99,28 @@ def make_slot(
         sheet="Октябрь 2026",
         cell="A5",
     )
+
+
+MON_PAST = date(2026, 9, 28)
+WED = date(2026, 9, 30)
+THU = date(2026, 10, 1)
+FRI = date(2026, 10, 2)
+MON = date(2026, 10, 5)
+FRI2 = date(2026, 10, 9)
+
+
+@pytest.fixture
+def board(tracker):
+    """Сегодня вторник 29.09; пост за понедельник уже вышел."""
+    sync_kp(
+        tracker,
+        [
+            make_slot(MON_PAST, topic="Продуктовый пост про суперлайк", status="Выпущено"),
+            make_slot(WED, topic="Карточки про фразу, которая сближает", rubric="Информационный"),
+            make_slot(THU, topic=None, rubric="Развлекательный"),
+            make_slot(FRI, topic="11 примеров флирта на свидании", rubric="Информационный"),
+            make_slot(MON, topic=None, rubric="Развлекательный"),
+            make_slot(FRI2, topic="Мем про выбор фильма и профессии", rubric="Развлекательный"),
+        ],
+    )
+    return {p.publish_date: p for p in tracker._select()}

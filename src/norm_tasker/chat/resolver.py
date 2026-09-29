@@ -18,6 +18,7 @@ from norm_tasker.tracker.models import Actor, Post
 from norm_tasker.tracker.service import Tracker
 from norm_tasker.tracker.stages import Stage, normalize
 
+STAGE_LIKE = (IntentKind.STAGE, IntentKind.CLIENT_OK, IntentKind.SHOWN_CLIENT)
 MAX_OPTIONS = 6
 BACK_DAYS = 3
 AHEAD_DAYS = 45
@@ -62,8 +63,7 @@ def _relevant(posts: list[Post], intent: Intent, actor: Actor, explicit: bool) -
     """Оставляет посты, к которым сообщение может относиться по смыслу."""
     live = [p for p in posts if not p.cancelled]
     kind = intent.kind
-    stage_kinds = (IntentKind.STAGE, IntentKind.CLIENT_OK, IntentKind.SHOWN_CLIENT)
-    if explicit and kind in stage_kinds:
+    if explicit and kind in STAGE_LIKE:
         return live  # пост назван прямо: не гадаем, подходит ли ему этап
     if kind in (IntentKind.CLAIM, IntentKind.ASSIGN):
         return [p for p in live if p.stage < Stage.PUBLISHED]
@@ -173,6 +173,9 @@ def resolve(
                 today - timedelta(days=BACK_DAYS), today + timedelta(days=AHEAD_DAYS)
             )
         pool = _relevant(universe, intent, actor, explicit=by_reply)
+        if intent.kind in (*STAGE_LIKE, IntentKind.ROLLBACK) and actor.role == Role.COPYWRITER:
+            # Копирайтер отчитывается о своих постах; чужие берём, только если своих нет.
+            pool = [p for p in pool if p.owned_by(actor)] or pool
         if ref.has_date:
             pool = _by_dates(pool, ref)
             if intent.kind in (IntentKind.CLAIM, IntentKind.ASSIGN):

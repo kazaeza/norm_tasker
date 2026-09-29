@@ -1,36 +1,7 @@
-from datetime import date
-
-import pytest
-
-from conftest import make_slot
+from conftest import FRI, FRI2, MON, THU, WED
 from norm_tasker.chat.resolver import resolve
 from norm_tasker.chat.rules import IntentKind, parse_message
 from norm_tasker.tracker.stages import Stage
-from norm_tasker.tracker.sync import sync_kp
-
-MON_PAST = date(2026, 9, 28)
-WED = date(2026, 9, 30)
-THU = date(2026, 10, 1)
-FRI = date(2026, 10, 2)
-MON = date(2026, 10, 5)
-FRI2 = date(2026, 10, 9)
-
-
-@pytest.fixture
-def board(tracker):
-    """Сегодня вторник 29.09; пост за понедельник уже вышел."""
-    sync_kp(
-        tracker,
-        [
-            make_slot(MON_PAST, topic="Продуктовый пост про суперлайк", status="Выпущено"),
-            make_slot(WED, topic="Карточки про фразу, которая сближает", rubric="Информационный"),
-            make_slot(THU, topic=None, rubric="Развлекательный"),
-            make_slot(FRI, topic="11 примеров флирта на свидании", rubric="Информационный"),
-            make_slot(MON, topic=None, rubric="Развлекательный"),
-            make_slot(FRI2, topic="Мем про выбор фильма и профессии", rubric="Развлекательный"),
-        ],
-    )
-    return {p.publish_date: p for p in tracker._select()}
 
 
 def run(tracker, text, actor, reply=None):

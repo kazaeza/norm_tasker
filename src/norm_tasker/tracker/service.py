@@ -292,7 +292,11 @@ class Tracker:
                 actor=actor,
                 kind=kind,
                 before={},
-                after={"publish_date": publish_date.isoformat(), "topic": topic},
+                after={
+                    "publish_date": publish_date.isoformat(),
+                    "topic": topic,
+                    **({"stage": int(stage)} if stage > Stage.NEW else {}),
+                },
                 source=journal_source,
                 msg_link=msg_link,
                 text=None,
