@@ -6,15 +6,10 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import signal
 from datetime import datetime, timedelta
 from html import escape
 from typing import Any
-
-from aiogram import Bot, Dispatcher
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramAPIError
-from aiogram.types import ChatMemberAdministrator, ChatMemberOwner
 
 from norm_tasker.bot.handlers import Handlers
 from norm_tasker.bot.notify import comment_reply, sync_messages
@@ -28,6 +23,9 @@ from norm_tasker.google.client import GoogleClient, GoogleError, PublicSheet
 from norm_tasker.google.tracker_sheet import push_rows, rows_for
 from norm_tasker.kp.parser import parse_kp
 from norm_tasker.reply import Reply
+from norm_tasker.tg.api import API_URL, Api
+from norm_tasker.tg.errors import NetworkError, RetryAfter, TelegramError
+from norm_tasker.tg.polling import poll_updates
 from norm_tasker.tracker.db import Database
 from norm_tasker.tracker.models import ExternalComment
 from norm_tasker.tracker.service import Tracker
@@ -55,7 +53,7 @@ class App:
         self,
         env: Env,
         settings: Settings,
-        bot: Bot,
+        bot: Api,
         tracker: Tracker,
         google: GoogleClient | None = None,
         kp_client: Any = None,
@@ -73,9 +71,8 @@ class App:
         )
         self.parsed_kp = None
         self.bot_id: int | None = None
-        self.dp = Dispatcher()
+        self.bot_username: str | None = None
         self.handlers = Handlers(self)
-        self.handlers.register(self.dp)
         self._kp_hash: str | None = None
         self._kp_failures = 0
         self._board_failures = 0
@@ -96,14 +93,26 @@ class App:
             self.info.warnings.append(text)
 
     async def startup(self) -> None:
-        me = await self.bot.get_me()
+        me = await self._get_me()
         self.bot_id = me.id
+        self.bot_username = me.username
         self.info.started_at = self.tracker.now()
         log.info("Бот @%s запущен", me.username)
         if self.settings.chat_id is None:
             self._warn("chat_id не задан в config.yaml: бот отвечает только на /id")
         await self.check_rights(me.can_read_all_group_messages)
         await self.notice_downtime()
+
+    async def _get_me(self):
+        """Ждёт, пока Telegram станет доступен: сразу после запуска сеть бывает не готова."""
+        delay = 1.0
+        while True:
+            try:
+                return await self.bot.get_me()
+            except (NetworkError, RetryAfter) as error:
+                log.warning("Telegram пока недоступен (%s), повторю через %.0f с", error, delay)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 30.0)
 
     async def check_rights(self, reads_all: bool | None = None) -> None:
         chat_id = self.settings.chat_id
@@ -112,16 +121,16 @@ class App:
         self.info.warnings = [w for w in self.info.warnings if not w.startswith("Права бота")]
         try:
             member = await self.bot.get_chat_member(chat_id, self.bot_id)
-        except TelegramAPIError as error:
+        except TelegramError as error:
             self._warn(f"Права бота: не удалось проверить чат {chat_id}: {error}")
             return
-        if not isinstance(member, ChatMemberAdministrator | ChatMemberOwner):
+        if member.status not in ("administrator", "creator"):
             note = "" if reads_all else " и без этого он не видит сообщения без /команд"
             self._warn(
                 f"Права бота: он не администратор чата — не сможет закреплять доску{note}. "
                 "Сделайте бота администратором."
             )
-        elif isinstance(member, ChatMemberAdministrator) and not member.can_pin_messages:
+        elif member.status == "administrator" and not member.can_pin_messages:
             self._warn("Права бота: нет права закреплять сообщения — доску закрепить не выйдет")
 
     async def notice_downtime(self) -> None:
@@ -161,8 +170,8 @@ class App:
             return
         self.tracker.state.set_meta("board_message_id", str(sent.message_id))
         try:
-            await self.bot.pin_chat_message(chat_id, sent.message_id, disable_notification=True)
-        except TelegramAPIError as error:
+            await self.bot.pin_chat_message(chat_id, sent.message_id)
+        except TelegramError as error:
             log.warning("Не удалось закрепить доску: %s", error)
             await self.sender.send(
                 Reply(
@@ -405,21 +414,58 @@ class App:
             asyncio.create_task(self._board_loop()),
             asyncio.create_task(self._sheet_loop()),
         ]
-        try:
-            await self.dp.start_polling(
-                self.bot, allowed_updates=ALLOWED_UPDATES, handle_signals=handle_signals
+        polling = asyncio.create_task(
+            poll_updates(
+                self.bot,
+                self.handlers.on_update,
+                allowed_updates=ALLOWED_UPDATES,
+                offset=self._load_offset(),
+                save_offset=self._save_offset,
             )
+        )
+        stopping = False
+
+        def stop() -> None:
+            nonlocal stopping
+            stopping = True
+            polling.cancel()
+
+        if handle_signals:
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                with contextlib.suppress(NotImplementedError, RuntimeError):
+                    loop.add_signal_handler(sig, stop)
+        try:
+            await polling
+        except asyncio.CancelledError:
+            if not stopping:
+                raise
         finally:
+            polling.cancel()
             for task in self._tasks:
                 task.cancel()
             await asyncio.gather(*self._tasks, return_exceptions=True)
-            await self.bot.session.close()
+            await self.bot.close()
+
+    # --- с какого обновления читать после перезапуска -----------------------------------------
+    def _load_offset(self) -> int | None:
+        saved = self.tracker.state.get_meta("tg_offset") or ""
+        owner, _, value = saved.partition(":")
+        if owner == str(self.bot_id) and value.isdigit():
+            return int(value)
+        return None  # другой бот или первый запуск: Telegram отдаст то, что накопилось
+
+    def _save_offset(self, offset: int) -> None:
+        self.tracker.state.set_meta("tg_offset", f"{self.bot_id}:{offset}")
 
 
 def build_app(env: Env, settings: Settings) -> App:
     """Собирает бота из настроек и переменных окружения."""
     if not env.bot_token:
-        raise SystemExit("Не задан BOT_TOKEN: возьмите токен у @BotFather и положите в .env")
+        raise SystemExit(
+            "Не задан BOT_TOKEN: возьмите токен у @BotFather и положите в .env "
+            "(на Railway — в Variables)"
+        )
     calendar = build_calendar(
         env.data_dir / "calendar_cache.json", settings.extra_days_off, settings.extra_workdays
     )
@@ -434,5 +480,5 @@ def build_app(env: Env, settings: Settings) -> App:
             "к ячейкам, комментарии в доках и копия трекера отключены"
         )
         kp_client = PublicSheet()
-    bot = Bot(env.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = Api(env.bot_token, base_url=env.telegram_api_url or API_URL)
     return App(env, settings, bot, tracker, google, kp_client)

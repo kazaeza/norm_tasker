@@ -124,3 +124,13 @@ def board(tracker):
         ],
     )
     return {p.publish_date: p for p in tracker._select()}
+
+
+@pytest.fixture
+def telegram():
+    """Подставной сервер Telegram на localhost (см. tests/tg_fixture.py)."""
+    from tg_fixture import FakeTelegram
+
+    server = FakeTelegram()
+    yield server
+    server.close()

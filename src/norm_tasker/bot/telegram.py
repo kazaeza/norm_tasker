@@ -7,25 +7,11 @@ import logging
 import re
 from html import unescape
 
-from aiogram import Bot
-from aiogram.enums import ParseMode
-from aiogram.exceptions import (
-    TelegramAPIError,
-    TelegramBadRequest,
-    TelegramForbiddenError,
-    TelegramRetryAfter,
-)
-from aiogram.types import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    LinkPreviewOptions,
-    Message,
-    ReactionTypeEmoji,
-    ReplyParameters,
-)
-
 from norm_tasker.config import Settings
 from norm_tasker.reply import Button, Reply
+from norm_tasker.tg.api import Api
+from norm_tasker.tg.errors import BadRequest, Forbidden, RetryAfter, TelegramError
+from norm_tasker.tg.types import Message
 from norm_tasker.tracker.service import Tracker
 
 log = logging.getLogger(__name__)
@@ -35,15 +21,15 @@ MAX_LENGTH = 4096
 ATTEMPTS = 3
 
 
-def keyboard(rows: list[list[Button]]) -> InlineKeyboardMarkup | None:
+def keyboard(rows: list[list[Button]]) -> dict | None:
     rows = [row for row in rows if row]
     if not rows:
         return None
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=b.text, callback_data=b.data) for b in row] for row in rows
+    return {
+        "inline_keyboard": [
+            [{"text": b.text, "callback_data": b.data} for b in row] for row in rows
         ]
-    )
+    }
 
 
 def message_link(chat_id: int, message_id: int) -> str | None:
@@ -59,7 +45,7 @@ def clip_message(text: str) -> str:
 
 
 class Sender:
-    def __init__(self, bot: Bot, tracker: Tracker, settings: Settings) -> None:
+    def __init__(self, bot: Api, tracker: Tracker, settings: Settings) -> None:
         self.bot = bot
         self.tracker = tracker
         self.settings = settings
@@ -89,24 +75,19 @@ class Sender:
                 message = await self.bot.send_message(
                     chat,
                     unescape(TAGS.sub("", text)) if plain else text,
-                    parse_mode=None if plain else ParseMode.HTML,
+                    parse_mode=None if plain else "HTML",
                     reply_markup=markup,
-                    reply_parameters=(
-                        ReplyParameters(message_id=reply_to, allow_sending_without_reply=True)
-                        if reply_to
-                        else None
-                    ),
-                    message_thread_id=thread,
-                    link_preview_options=LinkPreviewOptions(is_disabled=True),
+                    reply_to=reply_to,
+                    thread_id=thread,
                 )
-            except TelegramRetryAfter as error:
+            except RetryAfter as error:
                 log.warning("Telegram просит подождать %s с", error.retry_after)
-                await asyncio.sleep(error.retry_after + 1)
+                await asyncio.sleep((error.retry_after or 1) + 1)
                 continue
-            except TelegramForbiddenError:
+            except Forbidden:
                 log.error("Бота нет в чате %s или у него нет прав писать", chat)
                 return None
-            except TelegramBadRequest as error:
+            except BadRequest as error:
                 text_error = str(error).lower()
                 if "can't parse entities" in text_error and not plain:
                     log.warning("Разметка не принята, отправляю без неё: %s", error)
@@ -117,7 +98,7 @@ class Sender:
                     continue
                 log.error("Не удалось отправить сообщение: %s", error)
                 return None
-            except (TelegramAPIError, OSError):
+            except (TelegramError, OSError):
                 log.exception("Сбой при отправке сообщения (попытка %s)", attempt + 1)
                 await asyncio.sleep(2**attempt)
                 continue
@@ -130,10 +111,8 @@ class Sender:
 
     async def react(self, chat_id: int, message_id: int, emoji: str = "👍") -> bool:
         try:
-            await self.bot.set_message_reaction(
-                chat_id, message_id, [ReactionTypeEmoji(emoji=emoji)]
-            )
-        except TelegramAPIError as error:
+            await self.bot.set_message_reaction(chat_id, message_id, emoji)
+        except TelegramError as error:
             log.info("Не удалось поставить реакцию: %s", error)
             return False
         return True
@@ -143,27 +122,23 @@ class Sender:
     ) -> bool:
         try:
             await self.bot.edit_message_text(
+                chat_id,
+                message_id,
                 clip_message(text),
-                chat_id=chat_id,
-                message_id=message_id,
-                parse_mode=ParseMode.HTML,
                 reply_markup=keyboard(buttons or []),
-                link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
-        except TelegramBadRequest as error:
+        except BadRequest as error:
             if "message is not modified" in str(error).lower():
                 return True
             log.info("Не удалось изменить сообщение: %s", error)
             return False
-        except TelegramAPIError as error:
+        except TelegramError as error:
             log.info("Не удалось изменить сообщение: %s", error)
             return False
         return True
 
     async def remove_buttons(self, chat_id: int, message_id: int) -> None:
         try:
-            await self.bot.edit_message_reply_markup(
-                chat_id=chat_id, message_id=message_id, reply_markup=None
-            )
-        except TelegramAPIError as error:
+            await self.bot.remove_buttons(chat_id, message_id)
+        except TelegramError as error:
             log.info("Не удалось убрать кнопки: %s", error)

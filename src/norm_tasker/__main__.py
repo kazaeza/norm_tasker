@@ -13,7 +13,7 @@ from pathlib import Path
 
 from norm_tasker import fmt
 from norm_tasker.calendar_ru import build_calendar
-from norm_tasker.config import Env, Settings, load_env, load_settings
+from norm_tasker.config import Env, Settings, load_env, load_settings_for
 from norm_tasker.deadlines import compute_chain
 from norm_tasker.kp.parser import parse_kp
 from norm_tasker.tracker.stages import LABEL, stage_from_kp_status
@@ -34,16 +34,23 @@ def setup_logging(verbose: bool = False) -> None:
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO, handlers=[handler], force=True
     )
-    logging.getLogger("aiogram").setLevel(logging.INFO if verbose else logging.WARNING)
-    for noisy in ("aiohttp", "urllib3", "asyncio", "google"):
+    for noisy in ("urllib3", "asyncio", "google"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 def cmd_run(env: Env, settings: Settings) -> int:
     from norm_tasker.bot.app import build_app
+    from norm_tasker.tg.errors import Unauthorized
 
     app = build_app(env, settings)
-    asyncio.run(app.run())
+    try:
+        asyncio.run(app.run())
+    except Unauthorized:
+        print(
+            "Telegram не принял токен бота. Проверьте BOT_TOKEN: его выдаёт @BotFather.",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
@@ -124,17 +131,21 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     setup_logging(args.verbose)
 
-    env = load_env()
-    if args.command == "parse":
-        settings = load_settings(env.config_path) if env.config_path.exists() else None
-        return cmd_parse(env, settings, args.file, args.weeks, args.since)
-    if args.command == "health":
-        return cmd_health(env)
+    settings: Settings | None = None
     try:
-        settings = load_settings(env.config_path)
+        env = load_env()
+        if args.command == "parse":
+            settings = load_settings_for(env) if env.has_config else None
+        elif args.command != "health":
+            settings = load_settings_for(env)
     except (FileNotFoundError, ValueError) as error:
         print(f"Ошибка настроек: {error}", file=sys.stderr)
         return 2
+    if args.command == "parse":
+        return cmd_parse(env, settings, args.file, args.weeks, args.since)
+    if args.command == "health":
+        return cmd_health(env)
+    assert settings is not None
     if args.command == "doctor":
         return cmd_doctor(env, settings)
     return cmd_run(env, settings)

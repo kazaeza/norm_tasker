@@ -1,0 +1,9 @@
+# Настройки запуска на Railway: собрать из Dockerfile и перезапускать бота при любой остановке.
+# Токен и настройки задаются переменными (Variables), база лежит на томе, подключённом к /data.
+# Подробности — docs/SETUP.md, раздел «Вариант А: Railway».
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+restartPolicyType = "ALWAYS"

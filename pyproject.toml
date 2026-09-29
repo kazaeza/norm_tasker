@@ -9,8 +9,8 @@ description = "Telegram-бот: трекер постов по контент-п
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "aiogram>=3.13,<4",
     "openpyxl>=3.1",
+    "pydantic>=2.6",
     "pyyaml>=6",
     "google-auth>=2.30",
     "requests>=2.32",

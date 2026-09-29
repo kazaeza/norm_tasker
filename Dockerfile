@@ -11,8 +11,9 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install .
 
-# Настройки, ключ Google, база и кэш календаря лежат в /data — это папка data рядом с compose-файлом.
-VOLUME /data
+# Настройки, ключ Google, база и кэш календаря лежат в /data: это папка data рядом с compose-файлом
+# или том (volume), подключённый к /data на Railway. Строки VOLUME здесь нет намеренно —
+# Railway отклоняет сборку с ней.
 
 HEALTHCHECK --interval=60s --timeout=10s --start-period=90s --retries=3 \
     CMD ["python", "-m", "norm_tasker", "health"]

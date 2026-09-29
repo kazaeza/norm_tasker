@@ -4,16 +4,14 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError
-from aiogram.types import ChatMemberAdministrator, ChatMemberOwner
-
 from norm_tasker.calendar_ru import build_calendar
 from norm_tasker.config import Env, Role, Settings
 from norm_tasker.deadlines import kp_timeline, next_month
 from norm_tasker.fmt import wd_date
 from norm_tasker.google.client import GoogleClient, GoogleError, PublicSheet
 from norm_tasker.kp.parser import parse_kp
+from norm_tasker.tg.api import API_URL, Api
+from norm_tasker.tg.errors import TelegramError
 
 OK, BAD, WARN = "✅", "❌", "⚠️ "
 
@@ -39,14 +37,17 @@ class Report:
 
 async def check_telegram(env: Env, settings: Settings, report: Report) -> None:
     if not env.bot_token:
-        report.bad("BOT_TOKEN не задан", "создайте бота у @BotFather и положите токен в .env")
+        report.bad(
+            "BOT_TOKEN не задан",
+            "создайте бота у @BotFather и положите токен в .env (на Railway — в Variables)",
+        )
         return
-    bot = Bot(env.bot_token)
+    bot = Api(env.bot_token, base_url=env.telegram_api_url or API_URL)
     try:
         me = await bot.get_me()
-    except TelegramAPIError as error:
-        report.bad(f"Токен не принят Telegram: {error}", "проверьте BOT_TOKEN в .env")
-        await bot.session.close()
+    except TelegramError as error:
+        report.bad(f"Токен не принят Telegram: {error}", "проверьте BOT_TOKEN")
+        await bot.close()
         return
     report.ok(f"Бот @{me.username} отвечает")
     if me.can_read_all_group_messages:
@@ -68,11 +69,11 @@ async def check_telegram(env: Env, settings: Settings, report: Report) -> None:
             chat = await bot.get_chat(chat_id)
             report.ok(f"Чат найден: «{chat.title or chat.id}»")
             member = await bot.get_chat_member(chat_id, me.id)
-            if isinstance(member, ChatMemberOwner) or (
-                isinstance(member, ChatMemberAdministrator) and member.can_pin_messages
+            if member.status == "creator" or (
+                member.status == "administrator" and member.can_pin_messages
             ):
                 report.ok("Бот администратор и может закреплять сообщения")
-            elif isinstance(member, ChatMemberAdministrator):
+            elif member.status == "administrator":
                 report.warn(
                     "Бот администратор, но не может закреплять", "включите «Закрепление сообщений»"
                 )
@@ -81,14 +82,14 @@ async def check_telegram(env: Env, settings: Settings, report: Report) -> None:
                     "Бот не администратор чата",
                     "доску закрепить не получится; сделайте бота администратором",
                 )
-            if getattr(chat, "is_forum", False) and settings.thread_id is None:
+            if chat.is_forum and settings.thread_id is None:
                 report.warn(
                     "В группе включены темы, а thread_id не задан",
                     "отправьте /id в нужной теме и впишите thread_id в config.yaml",
                 )
-        except TelegramAPIError as error:
+        except TelegramError as error:
             report.bad(f"Чат {chat_id} недоступен: {error}", "бот должен быть добавлен в чат")
-    await bot.session.close()
+    await bot.close()
 
 
 def check_team(settings: Settings, report: Report) -> None:

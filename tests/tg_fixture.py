@@ -1,93 +1,97 @@
-"""Подставной Telegram: апдейты идут через настоящий диспетчер aiogram, а вместо сети —
+"""Подставной Telegram: апдейты идут через настоящие обработчики бота, а вместо сети —
 запись вызовов API и заготовленные ответы."""
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator
-from datetime import datetime
+import json
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from aiogram import Bot
-from aiogram.client.session.base import BaseSession
-from aiogram.types import (
-    CallbackQuery,
-    Chat,
-    ChatMemberAdministrator,
-    Message,
-    Update,
-    User,
-)
+from norm_tasker.tg.api import Api
+from norm_tasker.tg.errors import BadRequest
+from norm_tasker.tg.types import CallbackQuery, Chat, Message, Update, User
 
 BOT_ID = 42
 WORK_CHAT = -1001234567890
 
 
-class FakeSession(BaseSession):
+class FakeApi(Api):
+    """Вызовы Bot API записываются как («SendMessage», {параметры}) и получают готовый ответ."""
+
     def __init__(self) -> None:
-        super().__init__()
+        super().__init__("42:TEST", transport=object())  # type: ignore[arg-type]
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self._next_id = 1000
         self.reads_all = True
         self.can_pin = True
         self.reject_reactions = False
         self.reject_pin = False
+        self.failures: dict[str, list[Exception]] = {}
+
+    def fail_next(self, method: str, *errors: Exception) -> None:
+        """Следующие вызовы метода закончатся этими ошибками (по одной на вызов)."""
+        self.failures.setdefault(method, []).extend(errors)
 
     async def close(self) -> None:
         return None
 
-    async def stream_content(self, *args: Any, **kwargs: Any) -> AsyncGenerator[bytes, None]:
-        yield b""
-
-    async def make_request(self, bot: Bot, method: Any, timeout: int | None = None) -> Any:
-        name = type(method).__name__
-        self.calls.append((name, method.model_dump(exclude_none=True)))
+    async def call(
+        self, method: str, params: dict[str, Any] | None = None, *, timeout: float = 30
+    ) -> Any:
+        payload = {key: value for key, value in (params or {}).items() if value is not None}
+        name = method[0].upper() + method[1:]
+        self.calls.append((name, payload))
+        if self.failures.get(method):
+            raise self.failures[method].pop(0)
         handler = getattr(self, f"_{name}", None)
         if handler is None:
             return True
-        result = handler(method)
+        result = handler(payload)
         return await result if asyncio.iscoroutine(result) else result
 
     # --- ответы на вызовы ---------------------------------------------------------------
-    async def _GetUpdates(self, method: Any) -> list:
+    async def _GetUpdates(self, payload: dict[str, Any]) -> list:
         await asyncio.sleep(0.05)  # настоящий long polling ждёт; не крутим цикл вхолостую
         return []
 
-    def _GetMe(self, method: Any) -> User:
-        return User(
-            id=BOT_ID, is_bot=True, first_name="Тест", username="norm_test_bot",
-            can_read_all_group_messages=self.reads_all,
-        )  # fmt: skip
+    def _GetMe(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": BOT_ID, "is_bot": True, "first_name": "Тест", "username": "norm_test_bot",
+            "can_read_all_group_messages": self.reads_all,
+        }  # fmt: skip
 
-    def _SendMessage(self, method: Any) -> Message:
+    def _SendMessage(self, payload: dict[str, Any]) -> dict[str, Any]:
         self._next_id += 1
-        return Message(
-            message_id=self._next_id,
-            date=datetime.now(),
-            chat=Chat(id=method.chat_id, type="supergroup"),
-            text=method.text,
-            from_user=User(id=BOT_ID, is_bot=True, first_name="Тест"),
-        )
+        return {
+            "message_id": self._next_id,
+            "date": 0,
+            "chat": {"id": payload["chat_id"], "type": "supergroup"},
+            "text": payload["text"],
+            "from": {"id": BOT_ID, "is_bot": True, "first_name": "Тест"},
+        }
 
-    def _GetChatMember(self, method: Any) -> ChatMemberAdministrator:
-        return ChatMemberAdministrator.model_construct(
-            status="administrator",
-            user=User(id=BOT_ID, is_bot=True, first_name="Тест"),
-            can_pin_messages=self.can_pin,
-        )
+    def _GetChatMember(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "status": "administrator",
+            "user": {"id": BOT_ID, "is_bot": True, "first_name": "Тест"},
+            "can_pin_messages": self.can_pin,
+        }
 
-    def _SetMessageReaction(self, method: Any) -> bool:
+    def _SetMessageReaction(self, payload: dict[str, Any]) -> bool:
         if self.reject_reactions:
-            from aiogram.exceptions import TelegramBadRequest
-
-            raise TelegramBadRequest(method, "REACTION_INVALID")
+            raise BadRequest("Bad Request: REACTION_INVALID", method="setMessageReaction", code=400)
         return True
 
-    def _PinChatMessage(self, method: Any) -> bool:
+    def _PinChatMessage(self, payload: dict[str, Any]) -> bool:
         if self.reject_pin:
-            from aiogram.exceptions import TelegramBadRequest
-
-            raise TelegramBadRequest(method, "not enough rights to pin a message")
+            raise BadRequest(
+                "Bad Request: not enough rights to pin a message",
+                method="pinChatMessage",
+                code=400,
+            )
         return True
 
     # --- удобные выборки ---------------------------------------------------------------------
@@ -128,7 +132,6 @@ def text_update(
 ) -> Update:
     message = Message(
         message_id=_next("message"),
-        date=datetime.now(),
         chat=Chat(id=chat_id, type=chat_type),
         from_user=make_user(user_id, username, name),
         text=text,
@@ -141,7 +144,6 @@ def bot_message(message_id: int, chat_id: int = WORK_CHAT) -> Message:
     """Сообщение, которое бот отправил раньше: на него можно ответить."""
     return Message(
         message_id=message_id,
-        date=datetime.now(),
         chat=Chat(id=chat_id, type="supergroup"),
         from_user=User(id=BOT_ID, is_bot=True, first_name="Тест"),
         text="сообщение бота",
@@ -160,7 +162,6 @@ def callback_update(
     query = CallbackQuery(
         id=str(_next("update")),
         from_user=make_user(user_id, username, name),
-        chat_instance="test",
         message=bot_message(message_id, chat_id),
         data=data,
     )
@@ -192,3 +193,123 @@ class FakeGoogle:
 
     def replace_values(self, spreadsheet_id: str, tab: str, rows: list[list[str]]) -> None:
         self.written.append(rows)
+
+
+class FakeTelegram:
+    """Подставной сервер Bot API на localhost: те же адреса и формат ответов, что у Telegram.
+
+    Ответы можно заготовить (reply, fail, raw — по очереди на каждый метод). Без заготовки
+    сервер отвечает как настоящий: getMe, getChatMember, sendMessage, а getUpdates отдаёт
+    очередь пришедших сообщений (push_update) с позиции offset и ждёт, как long polling.
+    """
+
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+        self.script: dict[str, list[tuple[int, Any, float]]] = {}
+        self.updates: list[dict[str, Any]] = []
+        self._message_id = 9000
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(length) or b"{}")
+                method = self.path.rpartition("/")[2]
+                fake.requests.append(
+                    {
+                        "path": self.path,
+                        "method": method,
+                        "body": body,
+                        "content_type": self.headers.get("Content-Type"),
+                    }
+                )
+                status, payload, pause = fake.next_reply(method, body)
+                if pause:
+                    time.sleep(pause)
+                data = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *args: Any) -> None:
+                return None
+
+        class Server(ThreadingHTTPServer):
+            def handle_error(self, request: Any, client_address: Any) -> None:
+                return None  # клиент оборвал долгий опрос при остановке — это нормально
+
+        self.httpd = Server(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    # --- что ответит сервер --------------------------------------------------------------
+    def reply(self, method: str, result: Any = True, *, status: int = 200, pause: float = 0):
+        self.script.setdefault(method, []).append((status, {"ok": True, "result": result}, pause))
+
+    def fail(self, method: str, status: int, description: str, **parameters: Any) -> None:
+        body: dict[str, Any] = {"ok": False, "error_code": status, "description": description}
+        if parameters:
+            body["parameters"] = parameters
+        self.script.setdefault(method, []).append((status, body, 0))
+
+    def raw(self, method: str, status: int, body: bytes) -> None:
+        self.script.setdefault(method, []).append((status, body, 0))
+
+    def push_update(self, update: dict[str, Any]) -> None:
+        self.updates.append(update)
+
+    def next_reply(self, method: str, body: dict[str, Any]) -> tuple[int, Any, float]:
+        queue = self.script.get(method)
+        if queue:
+            return queue.pop(0)
+        return 200, {"ok": True, "result": self.default_result(method, body)}, 0
+
+    def default_result(self, method: str, body: dict[str, Any]) -> Any:
+        bot = {"id": BOT_ID, "is_bot": True, "first_name": "Тест", "username": "norm_test_bot"}
+        if method == "getMe":
+            return {**bot, "can_read_all_group_messages": True}
+        if method == "getChatMember":
+            return {"status": "administrator", "user": bot, "can_pin_messages": True}
+        if method == "sendMessage":
+            self._message_id += 1
+            chat = {"id": body["chat_id"], "type": "supergroup"}
+            return {
+                "message_id": self._message_id, "date": 0, "chat": chat, "text": body["text"],
+                "from": bot,
+            }  # fmt: skip
+        if method == "getUpdates":
+            found = [u for u in self.updates if u["update_id"] >= (body.get("offset") or 0)]
+            if not found:
+                time.sleep(min(body.get("timeout") or 0, 0.2))  # long polling, но недолго
+            return found
+        return True
+
+    # --- что видел сервер ----------------------------------------------------------------------
+    def bodies(self, method: str) -> list[dict[str, Any]]:
+        return [r["body"] for r in self.requests if r["method"] == method]
+
+    def close(self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def message_json(
+    update_id: int, text: str, *, user_id: int = 101, username: str = "cw_alpha"
+) -> dict[str, Any]:
+    """Сообщение рабочего чата в том виде, в каком его присылает Telegram."""
+    return {
+        "update_id": update_id,
+        "message": {
+            "message_id": update_id,
+            "date": 1780000000,
+            "chat": {"id": WORK_CHAT, "type": "supergroup", "title": "Команда"},
+            "from": {"id": user_id, "is_bot": False, "first_name": "Альфа", "username": username},
+            "text": text,
+        },
+    }

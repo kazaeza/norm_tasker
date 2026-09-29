@@ -2,12 +2,12 @@ import asyncio
 from datetime import date, datetime, timedelta
 
 import pytest
-from aiogram import Bot
 
 from kp_fixture import build_kp, standard_kp
 from norm_tasker.bot.app import KP_FAILURES_BEFORE_ALERT, App
 from norm_tasker.config import Env
 from norm_tasker.google.client import GoogleError
+from norm_tasker.tg.types import Chat, ChatMember, ChatMemberUpdated, Message, Update
 from norm_tasker.tracker.db import Database
 from norm_tasker.tracker.models import ExternalComment
 from norm_tasker.tracker.service import Tracker
@@ -15,10 +15,11 @@ from norm_tasker.tracker.stages import Stage
 from tg_fixture import (
     BOT_ID,
     WORK_CHAT,
+    FakeApi,
     FakeGoogle,
-    FakeSession,
     bot_message,
     callback_update,
+    make_user,
     text_update,
 )
 
@@ -30,12 +31,11 @@ FRIDAY = date(2026, 10, 2)
 
 @pytest.fixture
 def session():
-    return FakeSession()
+    return FakeApi()
 
 
 @pytest.fixture
 def app(tmp_path, settings, calendar, clock, session):
-    bot = Bot("42:TEST", session=session)
     tracker = Tracker(Database(":memory:"), settings, calendar, clock)
     env = Env(
         bot_token="42:TEST",
@@ -46,7 +46,7 @@ def app(tmp_path, settings, calendar, clock, session):
         tracker_spreadsheet_id="TRK",
     )
     tracker.state.set_meta("first_run", "2026-09-01")  # мягкий старт закончился
-    return App(env, settings, bot, tracker, FakeGoogle(build_kp(standard_kp())))
+    return App(env, settings, session, tracker, FakeGoogle(build_kp(standard_kp())))
 
 
 @pytest.fixture
@@ -59,7 +59,7 @@ async def ready(app, session):
 
 
 async def feed(app, update):
-    await app.dp.feed_update(app.bot, update)
+    await app.handlers.on_update(update)
 
 
 async def say(app, text, who, **kwargs):
@@ -273,6 +273,87 @@ async def test_id_works_anywhere_and_start_in_private(ready, session):
     session.clear()
     await say(app, "/today", ALPHA, chat_id=-1005555)  # чужой чат: команды не работают
     assert session.named("SendMessage") == []
+
+
+async def test_commands_addressed_to_another_bot_are_not_ours(ready, session):
+    app = ready
+    await say(app, "/today@norm_test_bot", ALPHA)  # имя нашего бота — команда наша
+    assert "☀️" in session.last_text()
+    session.clear()
+    await say(app, "/today@someone_else_bot", ALPHA)
+    await say(app, "/help@someone_else_bot", ALPHA, chat_id=101, chat_type="private")
+    await say(app, "/unknown_command", ALPHA)
+    assert session.named("SendMessage") == []
+
+
+async def test_photo_caption_is_read_like_text(ready, session):
+    app = ready
+    message = Message(
+        message_id=7001,
+        chat=Chat(id=WORK_CHAT, type="supergroup"),
+        from_user=make_user(**{"user_id": 101, "username": "cw_alpha", "name": "Альфа"}),
+        caption="беру пост на пятницу",
+    )
+    await feed(app, Update(update_id=7001, message=message))
+    assert friday_post(app).assignee_username == "cw_alpha"
+    empty = Message(
+        message_id=7002,
+        chat=Chat(id=WORK_CHAT, type="supergroup"),
+        from_user=make_user(101, "cw_alpha", "Альфа"),
+    )
+    session.clear()
+    await feed(app, Update(update_id=7002, message=empty))  # стикер или служебное сообщение
+    assert session.calls == []
+
+
+async def test_buttons_in_foreign_chats_are_ignored(ready, session):
+    app = ready
+    post = friday_post(app)
+    await feed(
+        app,
+        callback_update(f"claim:{post.id}", message_id=5, chat_id=-1009999999999, **ALPHA),
+    )
+    assert session.calls == [] and not app.tracker.get(post.id).assigned
+
+
+async def test_replies_stay_in_the_topic_they_were_asked_in(ready, session):
+    app = ready
+    asked = text_update("/today", **ALPHA)
+    asked.message.message_thread_id = 12
+    asked.message.is_topic_message = True
+    await feed(app, asked)
+    assert session.named("SendMessage")[-1]["message_thread_id"] == 12
+
+    reply_chain = text_update("/today", **ALPHA)
+    reply_chain.message.message_thread_id = 12  # цепочка ответов в обычной группе — не тема
+    session.clear()
+    await feed(app, reply_chain)
+    assert "message_thread_id" not in session.named("SendMessage")[-1]
+
+    post = friday_post(app)
+    pressed = callback_update(f"claim:{post.id}", message_id=session._next_id, **ALPHA)
+    pressed.callback_query.message.message_thread_id = 12
+    pressed.callback_query.message.is_topic_message = True
+    session.clear()
+    await feed(app, pressed)
+    assert app.tracker.get(post.id).assigned
+    assert all(body.get("message_thread_id") == 12 for body in session.named("SendMessage"))
+
+
+async def test_bot_status_change_rechecks_its_rights(ready, session):
+    app = ready
+    session.can_pin = False  # бота сделали администратором, но без права закреплять
+    event = ChatMemberUpdated(
+        chat=Chat(id=WORK_CHAT, type="supergroup"),
+        old_chat_member=ChatMember(status="member"),
+        new_chat_member=ChatMember(status="administrator", can_pin_messages=False),
+    )
+    await feed(app, Update(update_id=7004, my_chat_member=event))
+    assert session.named("GetChatMember")
+    assert any("нет права закреплять" in warning for warning in app.info.warnings)
+    session.can_pin = True
+    await feed(app, Update(update_id=7005, my_chat_member=event))
+    assert not any("нет права закреплять" in warning for warning in app.info.warnings)
 
 
 # --- доска -------------------------------------------------------------------------------------

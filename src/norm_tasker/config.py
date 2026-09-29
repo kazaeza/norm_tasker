@@ -2,11 +2,14 @@
 
 Секреты и идентификаторы таблиц берутся из переменных окружения, всё остальное —
 из config.yaml (команда, сроки, время напоминаний). Оба хранятся на сервере, а не
-в репозитории.
+в репозитории. Если файл положить некуда (например, на Railway), текст config.yaml
+можно передать переменной CONFIG_YAML или CONFIG_B64 (тот же текст в base64), а номер
+чата — переменными CHAT_ID и THREAD_ID.
 """
 
 from __future__ import annotations
 
+import base64
 import os
 from dataclasses import dataclass
 from datetime import date, time
@@ -188,10 +191,43 @@ class Env:
     google_credentials: Path | None
     kp_spreadsheet_id: str | None
     tracker_spreadsheet_id: str | None
+    config_text: str | None = None  # текст настроек из CONFIG_YAML / CONFIG_B64
+    chat_id: int | None = None  # CHAT_ID и THREAD_ID важнее значений из настроек
+    thread_id: int | None = None
+    telegram_api_url: str | None = None  # свой адрес Bot API, если api.telegram.org недоступен
 
     @property
     def db_path(self) -> Path:
         return self.data_dir / "tracker.db"
+
+    @property
+    def has_config(self) -> bool:
+        return self.config_text is not None or self.config_path.exists()
+
+
+def _env_int(env: dict[str, str], name: str) -> int | None:
+    raw = (env.get(name) or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} должен быть целым числом, а не {raw!r}") from exc
+
+
+def _env_config_text(env: dict[str, str]) -> str | None:
+    text = env.get("CONFIG_YAML")
+    if text and text.strip():
+        return text
+    encoded = env.get("CONFIG_B64")
+    if encoded and encoded.strip():
+        try:
+            return base64.b64decode("".join(encoded.split()), validate=True).decode("utf-8")
+        except ValueError as exc:  # и не-base64, и не UTF-8: оба — подклассы ValueError
+            raise ValueError(
+                "CONFIG_B64 не читается: там должен быть текст config.yaml, закодированный в base64"
+            ) from exc
+    return None
 
 
 def load_env(environ: dict[str, str] | None = None) -> Env:
@@ -206,13 +242,50 @@ def load_env(environ: dict[str, str] | None = None) -> Env:
         google_credentials=Path(creds) if creds else None,
         kp_spreadsheet_id=env.get("KP_SPREADSHEET_ID") or None,
         tracker_spreadsheet_id=env.get("TRACKER_SPREADSHEET_ID") or None,
+        config_text=_env_config_text(env),
+        chat_id=_env_int(env, "CHAT_ID"),
+        thread_id=_env_int(env, "THREAD_ID"),
+        telegram_api_url=env.get("TELEGRAM_API_URL") or None,
     )
+
+
+def _parse_raw(text: str) -> dict:
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Настройки не читаются как YAML: {exc}") from exc
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(
+            "Настройки должны быть строками «ключ: значение», как в config.example.yaml"
+        )
+    return raw
 
 
 def load_settings(path: Path) -> Settings:
     if not path.exists():
-        raise FileNotFoundError(
-            f"Не найден файл настроек {path}. Скопируйте config.example.yaml и заполните его."
-        )
-    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        raise FileNotFoundError(_missing_config(path))
+    return Settings.model_validate(_parse_raw(path.read_text(encoding="utf-8")))
+
+
+def _missing_config(path: Path) -> str:
+    return (
+        f"Не найден файл настроек {path}. Скопируйте config.example.yaml и заполните его "
+        "(или передайте текст настроек в переменной CONFIG_YAML)."
+    )
+
+
+def load_settings_for(env: Env) -> Settings:
+    """Настройки из переменной CONFIG_YAML/CONFIG_B64 или из файла; CHAT_ID и THREAD_ID сверху."""
+    if env.config_text is not None:
+        raw = _parse_raw(env.config_text)
+    elif env.config_path.exists():
+        raw = _parse_raw(env.config_path.read_text(encoding="utf-8"))
+    else:
+        raise FileNotFoundError(_missing_config(env.config_path))
+    if env.chat_id is not None:
+        raw["chat_id"] = env.chat_id
+    if env.thread_id is not None:
+        raw["thread_id"] = env.thread_id
     return Settings.model_validate(raw)

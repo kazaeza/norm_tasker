@@ -5,7 +5,7 @@ import pytest
 
 from kp_fixture import build_kp, standard_kp
 from norm_tasker.__main__ import main
-from norm_tasker.config import Role, Settings, load_env, load_settings
+from norm_tasker.config import Role, Settings, load_env, load_settings, load_settings_for
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -61,6 +61,59 @@ def test_env_loading(tmp_path):
     assert env.bot_token == "1:x" and env.db_path == tmp_path / "tracker.db"
     assert env.config_path == tmp_path / "config.yaml"
     assert env.google_credentials is None and env.tracker_spreadsheet_id is None
+
+
+YAML_TEXT = "chat_id: -1001\nteam:\n  - {name: Первый, username: first, role: copywriter}\n"
+
+
+def test_settings_can_come_from_the_environment_instead_of_a_file(tmp_path):
+    """На хостингах без файлов (Railway) настройки лежат в переменной CONFIG_YAML."""
+    env = load_env({"DATA_DIR": str(tmp_path), "CONFIG_YAML": YAML_TEXT})
+    assert env.has_config
+    settings = load_settings_for(env)
+    assert settings.chat_id == -1001 and settings.team[0].username == "first"
+
+
+def test_settings_from_base64_survive_line_breaks(tmp_path):
+    import base64
+
+    encoded = base64.b64encode(YAML_TEXT.encode("utf-8")).decode()
+    wrapped = encoded[:20] + "\n " + encoded[20:]  # при копировании строку легко разорвать
+    env = load_env({"DATA_DIR": str(tmp_path), "CONFIG_B64": wrapped})
+    assert load_settings_for(env).chat_id == -1001
+    with pytest.raises(ValueError, match="CONFIG_B64"):
+        load_env({"CONFIG_B64": "это не base64!"})
+
+
+def test_chat_id_variables_override_the_settings(tmp_path):
+    env = load_env(
+        {"DATA_DIR": str(tmp_path), "CONFIG_YAML": YAML_TEXT, "CHAT_ID": "-1009", "THREAD_ID": "7"}
+    )
+    settings = load_settings_for(env)
+    assert settings.chat_id == -1009 and settings.thread_id == 7
+    with pytest.raises(ValueError, match="CHAT_ID"):
+        load_env({"CHAT_ID": "чат"})
+
+
+def test_settings_variable_wins_over_the_file_and_file_still_works(tmp_path):
+    (tmp_path / "config.yaml").write_text("chat_id: -5\n", encoding="utf-8")
+    only_file = load_env({"DATA_DIR": str(tmp_path)})
+    assert load_settings_for(only_file).chat_id == -5
+    both = load_env({"DATA_DIR": str(tmp_path), "CONFIG_YAML": YAML_TEXT})
+    assert load_settings_for(both).chat_id == -1001
+    empty = load_env({"DATA_DIR": str(tmp_path / "нет")})
+    assert not empty.has_config
+    with pytest.raises(FileNotFoundError, match="CONFIG_YAML"):
+        load_settings_for(empty)
+
+
+def test_broken_settings_text_is_explained_not_a_traceback(monkeypatch, capsys):
+    monkeypatch.setenv("CONFIG_YAML", "team: [unclosed")
+    assert main(["doctor"]) == 2
+    assert "Ошибка настроек" in capsys.readouterr().err
+    monkeypatch.setenv("CONFIG_YAML", "- просто\n- список\n")
+    assert main(["doctor"]) == 2
+    assert "ключ: значение" in capsys.readouterr().err
 
 
 def test_parse_command_on_a_kp_file(tmp_path, capsys):
