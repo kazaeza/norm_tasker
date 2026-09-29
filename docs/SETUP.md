@@ -69,6 +69,8 @@ git checkout claude/smm-telegram-bot-plan-pcb17p   # пока ветка не в
 mkdir -p data
 ```
 
+Если репозиторий сделают приватным, `git clone` попросит вход в GitHub: используйте личный токен доступа (Settings → Developer settings → Personal access tokens) вместо пароля.
+
 Если пробуете на своём компьютере: установите [Docker Desktop](https://www.docker.com/products/docker-desktop/) и выполните то же самое в терминале.
 
 ## Шаг 6. Первый запуск
