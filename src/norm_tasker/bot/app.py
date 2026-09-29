@@ -76,6 +76,7 @@ class App:
         self._board_dirty = asyncio.Event()
         self._sheet_dirty = asyncio.Event()
         self._tasks: list[asyncio.Task[Any]] = []
+        self.delay_scale = 1.0  # во сколько раз сократить паузы перед первым запуском циклов
 
     # --- служебное ----------------------------------------------------------------------
     def mark_dirty(self) -> None:
@@ -354,7 +355,7 @@ class App:
 
     # --- запуск -----------------------------------------------------------------------------------
     async def _loop(self, name: str, action: Any, interval: float, delay: float = 0) -> None:
-        await asyncio.sleep(delay)
+        await asyncio.sleep(delay * self.delay_scale)
         while True:
             try:
                 await action()
@@ -383,7 +384,7 @@ class App:
             await self.push_sheet_once()
             await asyncio.sleep(SHEET_MIN_INTERVAL)
 
-    async def run(self) -> None:
+    async def run(self, handle_signals: bool = True) -> None:
         await self.startup()
         settings = self.settings
         self._tasks = [
@@ -399,7 +400,9 @@ class App:
             asyncio.create_task(self._sheet_loop()),
         ]
         try:
-            await self.dp.start_polling(self.bot, allowed_updates=ALLOWED_UPDATES)
+            await self.dp.start_polling(
+                self.bot, allowed_updates=ALLOWED_UPDATES, handle_signals=handle_signals
+            )
         finally:
             for task in self._tasks:
                 task.cancel()

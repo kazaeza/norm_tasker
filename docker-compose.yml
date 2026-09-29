@@ -7,3 +7,8 @@ services:
       TZ: Europe/Moscow
     volumes:
       - ./data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

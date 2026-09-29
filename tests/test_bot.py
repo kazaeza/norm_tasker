@@ -1,3 +1,4 @@
+import asyncio
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -449,3 +450,20 @@ async def test_summary_goes_out_after_five_minutes_even_without_kp(app, session,
     app.info.started_at = clock.current - timedelta(minutes=6)  # КП всё ещё не читается
     await app.tick()
     assert session.sent_texts()[0].startswith("☀️")
+
+
+async def test_app_starts_all_loops_and_stops_cleanly(app, session, clock, monkeypatch):
+    """Весь запуск целиком: проверка бота, циклы КП, доков, напоминаний, доски и таблицы."""
+    monkeypatch.setattr("norm_tasker.bot.app.refresh_calendar", lambda *args, **kwargs: None)
+    app.tracker.state.set_meta("first_run", "2026-09-01")
+    app.delay_scale = 0  # не ждать паузы перед первым запуском циклов
+    running = asyncio.create_task(app.run(handle_signals=False))
+    await asyncio.sleep(0.6)
+    assert app.bot_id == BOT_ID and len(app._tasks) == 6
+    assert all(not task.done() for task in app._tasks)
+    assert app.tracker.state.get_meta("heartbeat")  # цикл напоминаний отработал
+    assert app.tracker.count_posts("kp") >= 8 and app.info.last_kp_sync  # цикл КП отработал
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert all(task.cancelled() or task.done() for task in app._tasks)

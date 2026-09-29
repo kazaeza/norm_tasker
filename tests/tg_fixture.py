@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator
 from datetime import datetime
 from typing import Any
@@ -42,9 +43,16 @@ class FakeSession(BaseSession):
         name = type(method).__name__
         self.calls.append((name, method.model_dump(exclude_none=True)))
         handler = getattr(self, f"_{name}", None)
-        return handler(method) if handler else True
+        if handler is None:
+            return True
+        result = handler(method)
+        return await result if asyncio.iscoroutine(result) else result
 
     # --- ответы на вызовы ---------------------------------------------------------------
+    async def _GetUpdates(self, method: Any) -> list:
+        await asyncio.sleep(0.05)  # настоящий long polling ждёт; не крутим цикл вхолостую
+        return []
+
     def _GetMe(self, method: Any) -> User:
         return User(
             id=BOT_ID, is_bot=True, first_name="Тест", username="norm_test_bot",
