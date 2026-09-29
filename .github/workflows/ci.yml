@@ -17,3 +17,22 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
       - run: pytest
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Собрать образ
+        run: docker build -t norm-tasker .
+      - name: Образ запускается и видит встроенный календарь
+        run: |
+          docker run --rm norm-tasker python -m norm_tasker --help
+          docker run --rm norm-tasker python -c "from norm_tasker.calendar_ru import load_bundled; print(sorted(load_bundled()))"
+      - name: Пример настроек читается внутри образа
+        run: |
+          docker run --rm -v "$PWD/config.example.yaml:/data/config.yaml:ro" norm-tasker \
+            python -c "from pathlib import Path; from norm_tasker.config import load_settings; print(load_settings(Path('/data/config.yaml')).deadlines)"
+      - name: Compose-файл корректен
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
