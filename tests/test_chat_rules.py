@@ -9,8 +9,11 @@ from norm_tasker.tracker.stages import Stage
 TODAY = date(2026, 10, 7)  # среда
 
 
+CLIENT_NAMES = ("Алиса",)  # выдуманное имя человека клиента
+
+
 def parse(text):
-    return parse_message(text, TODAY)
+    return parse_message(text, TODAY, CLIENT_NAMES)
 
 
 # --- ссылки на пост -------------------------------------------------------------------
@@ -97,14 +100,14 @@ def test_claim_carries_references():
 
 
 def test_assign():
-    intent = parse("Даня, возьми пост на среду")
-    assert intent.kind == IntentKind.ASSIGN and intent.target == "даня"
+    intent = parse("Вася, возьми пост на среду")
+    assert intent.kind == IntentKind.ASSIGN and intent.target == "вася"
     assert intent.ref.weekdays == (2,)
     intent = parse("@cw_beta возьми мем на пятницу")
     assert intent.kind == IntentKind.ASSIGN and intent.target == "cw_beta"
-    intent = parse("пусть Илья возьмет пост про суперлайк")
-    assert intent.kind == IntentKind.ASSIGN and intent.target == "илья"
-    assert parse("Даня, возьми пост на среду?") is None
+    intent = parse("пусть Петя возьмет пост про суперлайк")
+    assert intent.kind == IntentKind.ASSIGN and intent.target == "петя"
+    assert parse("Вася, возьми пост на среду?") is None
 
 
 @pytest.mark.parametrize(
@@ -130,10 +133,10 @@ def test_release_needs_a_post_context():
         ("текст готов, отправил клиенту", Stage.TEXT_SHOWN),
         ("текст по мему готов", Stage.TEXT_SHOWN),
         ("мем готов", Stage.TEXT_SHOWN),
-        ("отправил марго текст про суперлайк", Stage.TEXT_SHOWN),
+        ("отправил алисе текст про суперлайк", Stage.TEXT_SHOWN),
         ("текст у клиента", Stage.TEXT_SHOWN),
         ("клиент ок по тексту", Stage.TEXT_OK),
-        ("марго окей по тексту", Stage.TEXT_OK),
+        ("алиса окей по тексту", Stage.TEXT_OK),
         ("ок по мему", Stage.TEXT_OK),
         ("текст согласован", Stage.TEXT_OK),
         ("клиент одобрил текст", Stage.TEXT_OK),
@@ -145,7 +148,7 @@ def test_release_needs_a_post_context():
         ("дизайнер прислал макет", Stage.DESIGN_READY),
         ("отрисовали!", Stage.DESIGN_READY),
         ("показал клиенту с дизайном", Stage.SHOWN_DESIGN),
-        ("отправил марго готовый пост", Stage.SHOWN_DESIGN),
+        ("отправил алисе готовый пост", Stage.SHOWN_DESIGN),
         ("финальный ок", Stage.FINAL_OK),
         ("фин ок по посту про суперлайк", Stage.FINAL_OK),
         ("клиент ок по дизайну", Stage.FINAL_OK),
@@ -184,7 +187,7 @@ def test_stage_lookalikes_are_ignored(text):
 
 def test_client_ok_and_shown_client_are_resolved_later():
     assert parse("клиент ок").kind == IntentKind.CLIENT_OK
-    assert parse("Марго ок").kind == IntentKind.CLIENT_OK
+    assert parse("Алиса ок").kind == IntentKind.CLIENT_OK
     assert parse("показал клиенту").kind == IntentKind.SHOWN_CLIENT
     assert parse("не показал клиенту") is None
 
@@ -192,7 +195,7 @@ def test_client_ok_and_shown_client_are_resolved_later():
 def test_rollback():
     intent = parse("клиент вернул текст на правки")
     assert (intent.kind, intent.stage) == (IntentKind.ROLLBACK, Stage.TAKEN)
-    intent = parse("марго вернула дизайн на правки, отдаю дизайнеру")
+    intent = parse("алиса вернула дизайн на правки, отдаю дизайнеру")
     assert (intent.kind, intent.stage) == (IntentKind.ROLLBACK, Stage.AT_DESIGNER)
     assert parse("правки от клиента по посту про суперлайк").kind == IntentKind.ROLLBACK
 
@@ -222,7 +225,7 @@ def test_kp_phrases():
     assert parse("окнул кп").kind == IntentKind.KP_OK
     assert parse("контент-план согласован").kind == IntentKind.KP_OK
     assert parse("показали кп клиенту").kind == IntentKind.KP_SHOWN
-    assert parse("отправил кп марго").kind == IntentKind.KP_SHOWN
+    assert parse("отправил кп алисе").kind == IntentKind.KP_SHOWN
     assert parse("беру кп").kind == IntentKind.KP_OWN
     assert parse("беру сборку кп").kind == IntentKind.KP_OWN
     assert parse("кп готов?") is None
@@ -232,3 +235,16 @@ def test_links_and_length_do_not_confuse_the_parser():
     intent = parse("беру пост https://docs.google.com/document/d/abc/edit на пятницу")
     assert intent.kind == IntentKind.CLAIM and intent.ref.weekdays == (4,)
     assert parse("") is None
+
+
+def test_client_names_come_from_settings_and_are_declined():
+    for phrase in ("отправил алисе текст", "скинул алисе текст про мем", "текст отправили Алисе"):
+        assert parse_message(phrase, TODAY, ("Алиса",)) is not None, phrase
+    # Без имени в настройках «Алисе» — просто слово, а не адресат.
+    assert parse_message("отправил алисе текст", TODAY) is None
+    assert parse_message("отправил клиенту текст", TODAY) is not None  # общее слово работает всегда
+    # Имя клиента не считается словом из темы поста.
+    intent = parse_message("отправил алисе текст про суперлайк", TODAY, ("Алиса",))
+    assert intent.ref.words == ("суперлайк",)
+    # Полное имя из настроек: берётся первое слово; «ь» и «я» в конце не мешают падежам.
+    assert parse_message("отправил марии текст", TODAY, ("Мария Иванова",)) is not None

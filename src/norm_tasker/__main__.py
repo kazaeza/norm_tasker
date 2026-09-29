@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import re
+import sqlite3
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -16,13 +18,25 @@ from norm_tasker.deadlines import compute_chain
 from norm_tasker.kp.parser import parse_kp
 from norm_tasker.tracker.stages import LABEL, stage_from_kp_status
 
+TOKEN = re.compile(r"\d{6,}:[\w-]{30,}")  # в адресах токен идёт сразу после «bot»
+
+
+class RedactingFormatter(logging.Formatter):
+    """Токен бота не должен попасть в журнал, даже если он окажется в тексте ошибки."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return TOKEN.sub("<токен скрыт>", super().format(record))
+
 
 def setup_logging(verbose: bool = False) -> None:
+    handler = logging.StreamHandler()
+    handler.setFormatter(RedactingFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     logging.basicConfig(
-        level=logging.DEBUG if verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        level=logging.DEBUG if verbose else logging.INFO, handlers=[handler], force=True
     )
     logging.getLogger("aiogram").setLevel(logging.INFO if verbose else logging.WARNING)
+    for noisy in ("aiohttp", "urllib3", "asyncio", "google"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 def cmd_run(env: Env, settings: Settings) -> int:
@@ -69,6 +83,27 @@ def cmd_parse(
     return 0
 
 
+def cmd_health(env: Env) -> int:
+    """Для Docker: 0, если бот жив (метка работы обновлялась в последние 5 минут)."""
+    if not env.db_path.exists():
+        print("нет базы данных: бот ещё не запускался")
+        return 1
+    try:
+        conn = sqlite3.connect(f"file:{env.db_path}?mode=ro", uri=True)
+        row = conn.execute("SELECT value FROM meta WHERE key = 'heartbeat'").fetchone()
+        conn.close()
+    except sqlite3.Error as error:
+        print(f"база недоступна: {error}")
+        return 1
+    if not row:
+        print("метки работы ещё нет")
+        return 1
+    beat = datetime.fromisoformat(row[0])
+    age = datetime.now(beat.tzinfo) - beat
+    print(f"последняя метка работы {int(age.total_seconds())} с назад")
+    return 0 if age < timedelta(minutes=5) else 1
+
+
 def cmd_doctor(env: Env, settings: Settings) -> int:
     from norm_tasker.doctor import run_doctor
 
@@ -81,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("run", help="запустить бота (по умолчанию)")
     sub.add_parser("doctor", help="проверить настройки, доступы и права бота")
+    sub.add_parser("health", help="жив ли бот (для проверки Docker)")
     parse = sub.add_parser("parse", help="показать, как бот разбирает выгрузку КП (xlsx)")
     parse.add_argument("file", type=Path)
     parse.add_argument("--weeks", type=int, default=3, help="сколько недель показать")
@@ -92,6 +128,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "parse":
         settings = load_settings(env.config_path) if env.config_path.exists() else None
         return cmd_parse(env, settings, args.file, args.weeks, args.since)
+    if args.command == "health":
+        return cmd_health(env)
     try:
         settings = load_settings(env.config_path)
     except (FileNotFoundError, ValueError) as error:

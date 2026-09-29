@@ -43,6 +43,7 @@ SHEET_REFRESH_SECONDS = 600
 CALENDAR_REFRESH_SECONDS = 24 * 3600
 DOWNTIME_HOURS = 20  # Telegram хранит апдейты для бота 24 часа
 KP_FAILURES_BEFORE_ALERT = 6
+FIRST_SYNC_WAIT_MINUTES = 5
 
 
 class App:
@@ -302,6 +303,13 @@ class App:
         await self.notify_comments()
 
     # --- напоминания --------------------------------------------------------------------------
+    def _awaiting_first_sync(self, now: datetime) -> bool:
+        """После запуска даём боту до 5 минут на первое чтение КП, если оно подключено."""
+        if not self.info.google_configured or self.info.last_kp_sync is not None:
+            return False
+        started = self.info.started_at
+        return started is not None and now - started < timedelta(minutes=FIRST_SYNC_WAIT_MINUTES)
+
     async def tick(self) -> None:
         now = self.tracker.now()
         self.tracker.state.set_meta("heartbeat", now.isoformat())
@@ -309,6 +317,8 @@ class App:
             return
         if self.tracker.state.get_meta("first_run") is None:
             self.tracker.state.set_meta("first_run", now.date().isoformat())
+        if self._awaiting_first_sync(now):
+            return  # иначе утреннее саммари могло бы уйти раньше, чем бот прочитал КП
         for rule, reply in due_rules(self.tracker, now, self.parsed_kp):
             if reply is not None and reply.text:
                 if await self.sender.send(reply) is None:

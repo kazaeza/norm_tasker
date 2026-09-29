@@ -324,7 +324,7 @@ def handle_message(
     """Ответ на сообщение команды; None — бот ничего не делает и молчит."""
     if actor.role == Role.BOSS:
         return None
-    intent = parse_message(text, tracker.today())
+    intent = parse_message(text, tracker.today(), tuple(tracker.settings.client_names))
     if intent is None:
         return None
     if intent.kind in (IntentKind.KP_OK, IntentKind.KP_SHOWN, IntentKind.KP_OWN):

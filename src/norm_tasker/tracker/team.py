@@ -59,7 +59,7 @@ class Team:
         return found[0] if found else None
 
     def find(self, token: str) -> Actor | None:
-        """Ищет участника по @username, имени или уменьшительному («Даня» → Даниил)."""
+        """Ищет участника по @username, имени или уменьшительному («Вася» → Василий)."""
         token = token.strip().lstrip("@").casefold().replace("ё", "е")
         if len(token) < 2:
             return None

@@ -1,0 +1,11 @@
+.git
+.github
+.venv
+data
+.env
+config.yaml
+*.xlsx
+__pycache__
+.pytest_cache
+.ruff_cache
+tests

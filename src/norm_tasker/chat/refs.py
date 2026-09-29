@@ -46,7 +46,7 @@ STOPWORDS = {
     "пятницу", "четверг", "среду", "вторник", "понедельник", "субботу", "воскресенье",
     "продуктовый", "развлекательный", "информационный", "выложил", "выложила", "опубликовал",
     "опубликовала", "перенесли", "перенести", "переносим", "отдал", "отдала", "передал",
-    "передала", "марго", "клиентом", "согласовал", "согласовала", "правки", "правкам",
+    "передала", "клиентом", "согласовал", "согласовала", "правки", "правкам",
 }  # fmt: skip
 STEM = 5
 
@@ -112,8 +112,8 @@ def find_dates(text: str, today: date) -> list[tuple[int, int, date]]:
     return sorted(found)
 
 
-def extract_refs(text: str, today: date) -> PostRef:
-    """Разбирает, какие посты названы в сообщении."""
+def extract_refs(text: str, today: date, ignore: tuple[str, ...] = ()) -> PostRef:
+    """Разбирает, какие посты названы в сообщении. ignore — основы имён, не относящихся к теме."""
     text = normalize(text)
     numbers = [int(a or b) for a, b in NUMBER.findall(text)]
     spans = [m.span() for m in NUMBER.finditer(text)]
@@ -153,8 +153,13 @@ def extract_refs(text: str, today: date) -> PostRef:
     for start, end in spans:
         for i in range(start, end):
             rest[i] = " "
+    candidates = re.findall(r"[а-яa-z]{4,}", "".join(rest))
     words = tuple(
-        dict.fromkeys(w for w in re.findall(r"[а-яa-z]{4,}", "".join(rest)) if w not in STOPWORDS)
+        dict.fromkeys(
+            w
+            for w in candidates
+            if w not in STOPWORDS and not any(w.startswith(stem) for stem in ignore)
+        )
     )
     return PostRef(
         numbers=tuple(dict.fromkeys(numbers)),

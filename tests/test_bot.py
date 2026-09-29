@@ -425,3 +425,27 @@ async def test_tracker_copy_errors_do_not_break_the_bot(ready):
 async def test_bot_id_is_known_after_startup(app, session):
     await app.startup()
     assert app.bot_id == BOT_ID
+
+
+async def test_summary_waits_for_the_first_kp_read(app, session, clock):
+    app.tracker.state.set_meta("first_run", "2026-09-01")
+    await app.startup()
+    session.clear()
+    clock.set(2026, 9, 29, 10, 0)
+    app.info.started_at = clock.current  # бот только что запущен
+    await app.tick()
+    assert session.sent_texts() == []  # КП ещё не прочитано: саммари было бы пустым
+    await app.apply_kp_data(app.google.xlsx)
+    session.clear()
+    await app.tick()
+    assert session.sent_texts()[0].startswith("☀️")
+
+
+async def test_summary_goes_out_after_five_minutes_even_without_kp(app, session, clock):
+    app.tracker.state.set_meta("first_run", "2026-09-01")
+    await app.startup()
+    session.clear()
+    clock.set(2026, 9, 29, 10, 0)
+    app.info.started_at = clock.current - timedelta(minutes=6)  # КП всё ещё не читается
+    await app.tick()
+    assert session.sent_texts()[0].startswith("☀️")

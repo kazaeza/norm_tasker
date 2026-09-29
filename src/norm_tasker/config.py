@@ -125,6 +125,9 @@ class Settings(Strict):
     # Кого считать участником, если его нет в списке team. None — игнорировать.
     unknown_role: Role | None = Role.COPYWRITER
     # Имена авторов комментариев в Google (как они показаны в файле).
+    # Как в чате зовут людей клиента («отправил Алисе текст»); по этим именам бот понимает, что
+    # текст или пост ушёл клиенту.
+    client_names: list[str] = []
     client_authors: list[str] = []
     team_authors: list[str] = []
     deadlines: DeadlineSettings = DeadlineSettings()
