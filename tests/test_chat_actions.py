@@ -284,3 +284,11 @@ def test_published_message_marks_todays_post(tracker, board, alpha, clock):
     reply = say(tracker, "вышел", alpha)
     assert "опубликован" in texts(reply) and f"№{board[WED].id}" in texts(reply)
     assert tracker.get(board[WED].id).stage == Stage.PUBLISHED
+
+
+def test_unanchored_talk_gets_no_answer(tracker, board, alpha):
+    """«Беру отпуск», «переносим созвон» — слова без даты, номера и рубрики: бот молчит."""
+    assert say(tracker, "беру отпуск на неделю", alpha) is None
+    assert say(tracker, "перенесём созвон на завтра", alpha) is None
+    # А когда пост назван датой, но такого нет, — отвечает.
+    assert "Не вижу такого поста" in texts(say(tracker, "беру пост на 16.10", alpha))

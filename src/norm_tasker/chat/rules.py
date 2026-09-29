@@ -87,7 +87,6 @@ STAGE_RULE_SOURCES: list[tuple[Stage, list[str]]] = [
     (
         Stage.PUBLISHED,
         [
-            late(r"\b(?:вышел|вышла|вышло)\b"),
             late(r"\bопубликова(?:л|ла|ли|н|на|но)\b"),
             late(r"\bвыложил[аи]?\b|\bвыложен[аоы]?\b"),
             late(r"\bзапостил[аи]?\b"),
@@ -241,6 +240,11 @@ KP_SHOWN_RULES = [
 ]
 KP_OWN_RULE = rx(r"\b(?:беру|возьму)\s+(?:сборку\s+)?(?:кп|контент-?план\w*)\b")
 URL = re.compile(r"https?://\S+")
+# «Вышел» без уточнений — слишком общее слово («вышла из отпуска»): засчитываем его в коротком
+# сообщении, при упоминании поста или когда названа дата, номер или тема.
+VAGUE_OUT = rx(r"\b(?:вышел|вышла|вышло)\b")
+BARE_OUT = rx(r"^(?:(?:пост|уже|все|всё)\s+)?(?:вышел|вышла|вышло)(?:\s+(?:пост|уже))?[.!\s]*$")
+POST_WORD = rx(r"\b(?:пост|мем|текст|подборк|карточк|сторис|опрос|анонс|рилс|клип|тест)\w*")
 
 
 @dataclass(frozen=True)
@@ -270,6 +274,11 @@ def ruleset(client_names: tuple[str, ...] = ()) -> RuleSet:
         rollback=[build(p) for p in ROLLBACK_SOURCES],
         client_stems=tuple(dict.fromkeys(name_stem(n) for n in client_names if name_stem(n))),
     )
+
+
+def _anchored(ref: PostRef) -> bool:
+    """Пост назван номером, датой или рубрикой — а не просто набором слов."""
+    return bool(ref.numbers or ref.has_date or ref.rubrics)
 
 
 def _negated(text: str, match: re.Match[str]) -> bool:
@@ -388,6 +397,10 @@ def parse_message(text: str, today: date, client_names: tuple[str, ...] = ()) ->
     for stage, patterns in rules.stage_rules:
         if _first(patterns, norm):
             stages.append((stage, f"stage:{stage.name.lower()}"))
+    if _first([VAGUE_OUT], norm) and (
+        BARE_OUT.match(norm) or POST_WORD.search(norm) or _anchored(refs(norm))
+    ):
+        stages.append((Stage.PUBLISHED, "stage:published"))
     if NOT_SENT.search(norm):
         stages = [(s, r) for s, r in stages if s not in LATE_STAGES]
     if stages:

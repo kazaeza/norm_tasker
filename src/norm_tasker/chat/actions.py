@@ -272,7 +272,9 @@ def _ask_which(tracker: Tracker, intent: Intent, res: Resolution, actor: Actor, 
 
 
 def _missing_reply(intent: Intent) -> Reply:
-    if intent.kind in SILENT_WHEN_MISSING or intent.ref.is_empty:
+    ref = intent.ref
+    anchored = bool(ref.numbers or ref.has_date or ref.rubrics)  # одни слова — может быть болтовня
+    if intent.kind in SILENT_WHEN_MISSING or not anchored:
         return Reply()
     return Reply("Не вижу такого поста в трекере. Посты на неделю — /week, свободные — /free.")
 
