@@ -66,6 +66,20 @@ def test_env_loading(tmp_path):
 YAML_TEXT = "chat_id: -1001\nteam:\n  - {name: Первый, username: first, role: copywriter}\n"
 
 
+def test_soft_start_can_be_switched_off_by_a_variable(tmp_path):
+    """Напоминания включаются одной переменной, без правки закодированных настроек."""
+    text = YAML_TEXT + "soft_start_days: 14\n"
+    base = {"DATA_DIR": str(tmp_path), "CONFIG_YAML": text}
+    assert load_settings_for(load_env(base)).soft_start_days == 14  # как записано в настройках
+    env = load_env({**base, "SOFT_START_DAYS": "0"})
+    assert env.soft_start_days == 0 and load_settings_for(env).soft_start_days == 0
+    assert load_settings_for(load_env({**base, "SOFT_START_DAYS": "3"})).soft_start_days == 3
+    assert load_settings_for(load_env({**base, "SOFT_START_DAYS": "-5"})).soft_start_days == 0
+    assert load_settings_for(load_env({**base, "SOFT_START_DAYS": " "})).soft_start_days == 14
+    with pytest.raises(ValueError, match="SOFT_START_DAYS"):
+        load_env({**base, "SOFT_START_DAYS": "скоро"})
+
+
 def test_settings_can_come_from_the_environment_instead_of_a_file(tmp_path):
     """В облачных хостингах без файлов настройки лежат в переменной CONFIG_YAML."""
     env = load_env({"DATA_DIR": str(tmp_path), "CONFIG_YAML": YAML_TEXT})

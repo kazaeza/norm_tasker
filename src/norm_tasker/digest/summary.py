@@ -13,7 +13,7 @@ from norm_tasker.kp.models import KpParseResult
 from norm_tasker.reply import Button, Reply, claim_button
 from norm_tasker.tracker.models import Post
 from norm_tasker.tracker.service import Tracker
-from norm_tasker.tracker.stages import Stage
+from norm_tasker.tracker.stages import NEXT_STEP, Stage
 from norm_tasker.tracker.sync import pending_comment_notifications
 
 LIMIT = 8  # строк в разделе; остальное сворачиваем в «…и ещё N»
@@ -105,6 +105,30 @@ def free_posts_block(
     return text, buttons, [p.id for p in picked]
 
 
+def in_progress_block(
+    tracker: Tracker, posts: list[Post], flagged: set[int], today: date, *, tag: bool
+) -> str | None:
+    """Первый рабочий день недели: что уже в работе — кто что делает и к какому сроку.
+
+    Посты, о которых в саммари уже сказано в «Горит» и «Сегодня и скоро» (`flagged`), не повторяем.
+    """
+    horizon = today + timedelta(days=FREE_WINDOW_DAYS)
+    working = [
+        p
+        for p in posts
+        if p.assigned and p.id not in flagged and today <= p.publish_date <= horizon
+    ]
+    if not working:
+        return None
+    lines = []
+    for post in working:
+        who = tracker.team.mention_assignee(post) if tag else escape(post.assignee_name or "")
+        due = tracker.chain(post).stage_due(Stage(post.stage + 1))
+        step = f"; {NEXT_STEP[post.stage]} — до {fmt.dt_short(due)}" if due else ""
+        lines.append(f"• {fmt.line(post)} — {who}, {fmt.stage_text(post.stage)}{step}")
+    return f"📋 В работе на 2 недели ({len(working)}):\n" + "\n".join(_capped(lines))
+
+
 def comments_block(tracker: Tracker) -> tuple[str | None, list[str]]:
     notes = pending_comment_notifications(tracker)
     if not notes:
@@ -165,6 +189,9 @@ def build_summary(
     buttons: list[list[Button]] = []
     post_ids: list[int] = []
     if first_workday_of_week(tracker, today):
+        working = in_progress_block(tracker, posts, {i.post.id for i in issues}, today, tag=tag)
+        if working:
+            sections.append(working)
         block = free_posts_block(tracker, today)
         if block:
             text, buttons, post_ids = block

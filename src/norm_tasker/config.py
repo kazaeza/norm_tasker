@@ -4,7 +4,8 @@
 из config.yaml (команда, сроки, время напоминаний). Оба хранятся на сервере, а не
 в репозитории. Если файл положить некуда (например, в облачном хостинге), текст config.yaml
 можно передать переменной CONFIG_YAML или CONFIG_B64 (тот же текст в base64), а номер
-чата — переменными CHAT_ID и THREAD_ID.
+чата — переменными CHAT_ID и THREAD_ID. Срок мягкого старта, когда бот ещё не напоминает о
+сроках, задаёт SOFT_START_DAYS: 0 включает напоминания сразу, без правки настроек.
 """
 
 from __future__ import annotations
@@ -200,6 +201,7 @@ class Env:
     gemini_url: str | None = None  # GEMINI_URL: адрес API, если ключ выдал посредник
     ai_enabled: bool = True  # AI_ENABLED=0 выключает ИИ, не убирая ключ
     ai_listen: bool = True  # AI_LISTEN=0: не разбирать сообщения, которые боту не адресованы
+    soft_start_days: int | None = None  # SOFT_START_DAYS важнее настроек; 0 — без мягкого старта
 
     @property
     def ai_on(self) -> bool:
@@ -263,6 +265,7 @@ def load_env(environ: dict[str, str] | None = None) -> Env:
         gemini_url=(env.get("GEMINI_URL") or "").strip() or None,
         ai_enabled=(env.get("AI_ENABLED") or "1").strip().lower() not in OFF_WORDS,
         ai_listen=(env.get("AI_LISTEN") or "1").strip().lower() not in OFF_WORDS,
+        soft_start_days=_env_int(env, "SOFT_START_DAYS"),
     )
 
 
@@ -305,4 +308,6 @@ def load_settings_for(env: Env) -> Settings:
         raw["chat_id"] = env.chat_id
     if env.thread_id is not None:
         raw["thread_id"] = env.thread_id
+    if env.soft_start_days is not None:
+        raw["soft_start_days"] = max(env.soft_start_days, 0)
     return Settings.model_validate(raw)

@@ -148,6 +148,53 @@ def test_monday_lists_free_posts_with_buttons(tracker, board, clock):
     assert build_summary(tracker, tracker.now())[0].buttons == []  # не понедельник
 
 
+def test_monday_lists_what_is_in_progress(tracker, board, beta, clock):
+    tracker.claim(board[FRI2].id, beta)
+    clock.set(2026, 10, 5, 9, 30)
+    text = build_summary(tracker, tracker.now())[0].text
+    assert "📋 В работе на 2 недели (1):" in text
+    line = next(row for row in text.splitlines() if f"№{board[FRI2].id}" in row)
+    assert line.startswith("• пт 09.10 · ") and "@cw_beta" in line
+    assert "✍️ взят, пишется текст; написать текст и показать клиенту — до ср 07.10 18:00" in line
+    assert text.index("📋") < text.index("🆓")  # сначала своё, потом свободное
+
+
+def test_monday_in_progress_list_does_not_repeat_what_is_already_burning(
+    tracker, board, alpha, beta, clock
+):
+    tracker.claim(board[MON].id, alpha)  # выходит сегодня без показа клиенту: это уже в «Горит»
+    tracker.claim(board[FRI2].id, beta)
+    clock.set(2026, 10, 5, 9, 30)
+    text = build_summary(tracker, tracker.now())[0].text
+    assert "🔴 Горит" in text and "📋 В работе на 2 недели (1):" in text
+    assert text.count(f"№{board[MON].id}") == 1
+
+
+def test_soft_monday_list_names_authors_without_tags(tracker, board, beta, clock):
+    tracker.claim(board[FRI2].id, beta)
+    clock.set(2026, 10, 5, 9, 30)
+    text = build_summary(tracker, tracker.now(), soft=True)[0].text
+    assert "Копирайтер Бета" in text and "@cw_beta" not in text
+
+
+def test_in_progress_list_is_only_for_the_first_workday_of_the_week(tracker, board, beta, clock):
+    tracker.claim(board[FRI2].id, beta)
+    clock.set(2026, 10, 6, 9, 30)  # вторник
+    assert "📋" not in build_summary(tracker, tracker.now())[0].text
+    clock.set(2026, 10, 5, 9, 30)  # понедельник, но у всех постов ещё нет автора
+    tracker.release(board[FRI2].id, beta)
+    assert "📋" not in build_summary(tracker, tracker.now())[0].text
+
+
+def test_in_progress_list_is_capped(tracker, board, beta, clock):
+    for number in range(12):
+        post = tracker.add_post(date(2026, 10, 12), f"Пост номер {number}", beta)
+        tracker.claim(post.id, beta)
+    clock.set(2026, 10, 5, 9, 30)
+    text = build_summary(tracker, tracker.now())[0].text
+    assert "📋 В работе на 2 недели (12):" in text and "…и ещё 4" in text
+
+
 def test_first_workday_when_monday_is_a_holiday(tracker):
     assert first_workday_of_week(tracker, date(2026, 10, 5))  # обычный понедельник
     assert not first_workday_of_week(tracker, date(2026, 10, 6))
