@@ -286,6 +286,60 @@ async def test_commands_addressed_to_another_bot_are_not_ours(ready, session):
     assert session.named("SendMessage") == []
 
 
+async def test_mention_with_a_question_gets_an_answer(ready, session):
+    app = ready
+    for text, marker in [
+        ("@norm_test_bot чё там по задачам", "📌 Доска"),  # как /week
+        ("@norm_test_bot чё по задачам?", "📌 Доска"),
+        ("@Norm_Test_Bot что горит сегодня", "☀️"),
+        ("@norm_test_bot какие свободные посты", "Без ответственного"),
+        ("@norm_test_bot что по кп", "📅 КП на"),
+        ("@norm_test_bot мои посты", "За вами ничего нет"),
+    ]:
+        session.clear()
+        await say(app, text, ALPHA)
+        assert marker in session.last_text(), text
+
+
+async def test_mention_without_known_words_gets_a_hint(ready, session):
+    app = ready
+    for text in ("@norm_test_bot", "@norm_test_bot как погода?"):
+        session.clear()
+        await say(app, text, ALPHA)
+        reply = session.last_text()
+        assert "Не понял" in reply and "/week" in reply and "/help" in reply, text
+        assert session.named("SendMessage")[-1]["reply_parameters"]["message_id"]
+
+
+async def test_without_our_name_the_bot_stays_silent(ready, session):
+    app = ready
+    await say(app, "чё там по задачам", ALPHA)
+    await say(app, "@someone_else_bot чё там по задачам", ALPHA)
+    await say(app, "@norm_test_bot чё там по задачам", ALPHA, chat_id=-1005555)  # чужой чат
+    assert session.named("SendMessage") == []
+
+
+async def test_report_with_a_mention_is_still_a_report(ready, session):
+    app = ready
+    await say(app, "@norm_test_bot беру пост на пятницу", ALPHA)
+    assert friday_post(app).assignee_username == "cw_alpha"
+    assert "Не понял" not in session.last_text()
+
+
+async def test_stranger_gets_read_only_answers(ready, session):
+    app = ready
+    app.settings.unknown_role = None  # людей вне списка команды бот не считает участниками
+    stranger = {"user_id": 999, "username": "stranger_x", "name": "Гость"}
+    await say(app, "@norm_test_bot что горит сегодня", stranger)
+    assert "☀️" in session.last_text()
+    session.clear()
+    await say(app, "@norm_test_bot мои посты", stranger)  # «мои» у того, кого нет в команде
+    assert "Не понял" in session.last_text()
+    session.clear()
+    await say(app, "@norm_test_bot беру пост на пятницу", stranger)
+    assert not friday_post(app).assigned
+
+
 async def test_photo_caption_is_read_like_text(ready, session):
     app = ready
     message = Message(

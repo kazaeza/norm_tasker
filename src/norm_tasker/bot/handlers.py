@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from norm_tasker.bot import views
 from norm_tasker.bot.telegram import message_link
 from norm_tasker.chat.actions import handle_callback, handle_message
+from norm_tasker.chat.asks import addressed_to, classify_ask
 from norm_tasker.config import Role
 from norm_tasker.digest.board import build_board
 from norm_tasker.reply import Reply
@@ -211,9 +212,23 @@ class Handlers:
     # --- сообщения команды ---------------------------------------------------------------------
     async def on_text(self, message: Message) -> None:
         actor = self.identify(message.from_user)
-        if actor is None:
-            return
         text = message.text or message.caption or ""
+        if actor is not None and await self.on_report(message, actor, text):
+            return
+        if addressed_to(text, self.app.bot_username):
+            await self.on_mention(message, actor, text)
+
+    async def on_mention(self, message: Message, actor: Actor | None, text: str) -> None:
+        """Бота позвали по имени, а фраза не похожа на отчёт о посте: отвечаем, а не молчим."""
+        name = classify_ask(text, self.app.bot_username)
+        handler = self.commands.get(name) if name else None
+        if handler is not None and (name != "my" or actor is not None):
+            await handler(message, "")
+            return
+        await self.respond(message, views.unsure_reply())
+
+    async def on_report(self, message: Message, actor: Actor, text: str) -> bool:
+        """Отчёт команды о постах. False — бот ничего не понял или не нашёл, что ответить."""
         reply_post_ids = None
         replied = message.reply_to_message
         if (
@@ -233,11 +248,12 @@ class Handlers:
             )
         except Exception:
             log.exception("Не удалось обработать сообщение %s", message.message_id)
-            return
+            return True  # сбой уже в журнале; «не понял» тут было бы неправдой
         if reply is None or reply.is_empty():
-            return
+            return False
         await self.respond(message, reply)
         self.app.mark_dirty()
+        return True
 
     # --- кнопки --------------------------------------------------------------------------------
     async def answer(
