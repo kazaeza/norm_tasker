@@ -231,6 +231,21 @@ def _simple_reply(kind: IntentKind, tracker: Tracker, item: Applied, actor: Acto
     return Reply()
 
 
+def added_post_reply(tracker: Tracker, actor: Actor, post: Post) -> Reply:
+    """Ответ на «добавь пост»: что добавлено, до какого срока взять и как отменить."""
+    chain = tracker.chain(post)
+    entry = tracker.last_undoable(actor)
+    buttons = [[undo_button(entry.id)]] if entry else []
+    return Reply(
+        f"➕ Добавлен пост {fmt.line(post)} — в КП его нет.\n"
+        f"Взять — до {fmt.dt_short(chain.take_by)}, "
+        f"текст клиенту — до {fmt.dt_short(chain.text_shown_by)}.",
+        [[claim_button(post.id, f"Беру №{post.id}")], *buttons],
+        post_ids=[post.id],
+        kind="free",
+    )
+
+
 def build_reply(
     tracker: Tracker, kind: IntentKind, applied: list[Applied], confident: bool, actor: Actor
 ) -> Reply:

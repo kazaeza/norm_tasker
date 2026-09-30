@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from html import escape
 
 from norm_tasker import __version__, fmt
+from norm_tasker.chat.actions import added_post_reply
 from norm_tasker.chat.refs import extract_refs, find_dates, topic_score
 from norm_tasker.config import Role
 from norm_tasker.digest.board import build_board
@@ -30,8 +31,7 @@ HELP = """Я слежу за постами из КП и за тем, кто ч�
 • «пост №12 переносим на 20.10» — перенести;
 • «кп окей», «показали кп клиенту», «беру кп» — про КП на следующий месяц;
 • ответ «не пост» на моё сообщение — убрать строку из трекера;
-• позовите меня по имени или ответьте на моё сообщение: «что по задачам», «что горит», \
-«мои посты», «свободные посты» — отвечу так же, как на команды ниже.
+{ask}
 
 Если не уверен, спрошу кнопками. Любое действие можно отменить кнопкой или командой /undo.
 
@@ -49,6 +49,28 @@ HELP = """Я слежу за постами из КП и за тем, кто ч�
 /status — как я работаю
 /id — идентификаторы чата и ваш"""
 
+
+ASK_PLAIN = (
+    "• позовите меня по имени или ответьте на моё сообщение: «что по задачам», «что горит», "
+    "«мои посты», «свободные посты» — отвечу так же, как на команды ниже."
+)
+ASK_AI = (
+    "• говорите со мной как с коллегой: позовите по имени («бот, …»), через @ или ответьте на "
+    "моё сообщение — «отдай пост про … дизайнеру», «когда срок у моего поста?», «что у нас на "
+    "неделе?». Отвечу и запишу, что нужно. Понимает меня ИИ (Gemini, Google): сообщения про "
+    "посты уходят туда на разбор, даже если ко мне не обращались."
+)
+
+AI_NOTICE = (
+    "🧠 Теперь я понимаю обычные фразы с помощью ИИ (Gemini, Google): сообщения чата про посты "
+    "уходят туда на разбор. Пишите мне как коллеге: «бот, отдай пост про … дизайнеру», "
+    "«что у меня горит?». Если такое чтение чата не нужно, владелец бота может его выключить."
+)
+NOT_ALLOWED = "Записывать в трекер могут копирайтеры и ответственный за проект."
+NOT_RECORDED = (
+    "Не получилось это записать: не нашёл такой пост или ничего не изменилось. "
+    "Посты недели — /week."
+)
 
 UNSURE = """Не понял, что нужно. Обычные вопросы я пока не разбираю — только команды \
 и короткие отчёты о постах («беру пост на пятницу», «текст готов»).
@@ -80,8 +102,8 @@ class RuntimeInfo:
     ai_error: str | None = None  # чем кончилась последняя попытка, если неудачей
 
 
-def help_reply() -> Reply:
-    return Reply(HELP, kind="help")
+def help_reply(ai: bool = False) -> Reply:
+    return Reply(HELP.replace("{ask}", ASK_AI if ai else ASK_PLAIN), kind="help")
 
 
 def unsure_reply() -> Reply:
@@ -271,18 +293,7 @@ def add_post_from_text(tracker: Tracker, actor: Actor, args: str) -> Reply:
     topic = " ".join((args[:start] + " " + args[end:]).split()).strip(" ,:—-") or None
     if actor.role == Role.BOSS:
         return Reply()
-    post = tracker.add_post(day, topic, actor)
-    chain = tracker.chain(post)
-    entry = tracker.last_undoable(actor)
-    buttons = [[Button("↩️ Отменить", f"undo:{entry.id}")]] if entry else []
-    return Reply(
-        f"➕ Добавлен пост {fmt.line(post)} — в КП его нет.\n"
-        f"Взять — до {fmt.dt_short(chain.take_by)}, "
-        f"текст клиенту — до {fmt.dt_short(chain.text_shown_by)}.",
-        [[Button(f"Беру №{post.id}", f"claim:{post.id}")], *buttons],
-        post_ids=[post.id],
-        kind="free",
-    )
+    return added_post_reply(tracker, actor, tracker.add_post(day, topic, actor))
 
 
 def inventory_view(tracker: Tracker) -> Reply:
@@ -317,7 +328,9 @@ def inventory_view(tracker: Tracker) -> Reply:
     return Reply(text[:4000], buttons, post_ids=[p.id for p in posts], kind="free")
 
 
-def status_view(tracker: Tracker, info: RuntimeInfo, chat_ok: bool) -> Reply:
+def status_view(
+    tracker: Tracker, info: RuntimeInfo, chat_ok: bool, ai_listen: bool = False
+) -> Reply:
     now = tracker.now()
     lines = [f"🤖 Версия {__version__}"]
     if info.started_at:
@@ -351,9 +364,14 @@ def status_view(tracker: Tracker, info: RuntimeInfo, chat_ok: bool) -> Reply:
     if info.ai_configured:
         model = f", модель {escape(info.ai_model)}" if info.ai_model else ""
         lines.append(
-            f"🧠 ИИ: Gemini{model}. Отвечает на вопросы, когда меня зовут по имени "
-            "или отвечают на моё сообщение"
+            f"🧠 ИИ: Gemini{model}. Отвечаю, когда меня зовут или отвечают на моё сообщение"
         )
+        if ai_listen:
+            lines.append(
+                "Читаю сообщения чата про посты и записываю отчёты сам (AI_LISTEN=0 выключит)"
+            )
+        else:
+            lines.append("Сообщения, обращённые не ко мне, не читаю")
         if info.ai_error:
             lines.append(f"⚠️ ИИ не отвечает: {escape(info.ai_error)}")
         elif info.ai_ok_at:

@@ -7,12 +7,21 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
-from norm_tasker.ai.assistant import ask_text
+from norm_tasker.ai.assistant import Request, ask_text, to_html
 from norm_tasker.ai.gemini import AiError
+from norm_tasker.ai.interpreter import Interpretation
 from norm_tasker.bot import views
 from norm_tasker.bot.telegram import message_link
 from norm_tasker.chat.actions import handle_callback, handle_message
-from norm_tasker.chat.asks import addressed_to, classify_ask, is_acknowledgement
+from norm_tasker.chat.ai_actions import run_actions
+from norm_tasker.chat.asks import (
+    addressed_to,
+    called_by_name,
+    classify_ask,
+    is_acknowledgement,
+    looks_like_work,
+)
+from norm_tasker.chat.log import ChatLine
 from norm_tasker.config import Role
 from norm_tasker.digest.board import build_board
 from norm_tasker.reply import Reply
@@ -32,6 +41,9 @@ PRIVATE_START = (
 )
 
 CommandHandler = Callable[[Message, str], Awaitable[None]]
+
+MAX_LISTEN_BACKLOG = 8  # столько сообщений ждёт ИИ; больше — обычные разговоры пропускаем
+QUOTE_LIMIT = 500  # сколько знаков сообщения, на которое ответили, уходит в ИИ
 
 
 class Handlers:
@@ -139,7 +151,7 @@ class Handlers:
         await self.sender.send(Reply(PRIVATE_START), chat_id=message.chat.id, thread_id=None)
 
     async def cmd_help(self, message: Message, args: str = "") -> None:
-        await self.respond(message, views.help_reply())
+        await self.respond(message, views.help_reply(self.app.ai is not None))
 
     async def cmd_today(self, message: Message, args: str = "") -> None:
         await self.respond(message, views.today_view(self.tracker, self.app.parsed_kp))
@@ -206,7 +218,12 @@ class Handlers:
     async def cmd_status(self, message: Message, args: str = "") -> None:
         await self.respond(
             message,
-            views.status_view(self.tracker, self.app.info, self.app.settings.chat_id is not None),
+            views.status_view(
+                self.tracker,
+                self.app.info,
+                self.app.settings.chat_id is not None,
+                self.app.ai_listen,
+            ),
         )
 
     async def cmd_board(self, message: Message, args: str = "") -> None:
@@ -216,10 +233,23 @@ class Handlers:
     async def on_text(self, message: Message) -> None:
         actor = self.identify(message.from_user)
         text = message.text or message.caption or ""
+        context = self.remember_line(message, actor, text)
         if actor is not None and await self.on_report(message, actor, text):
             return
-        if addressed_to(text, self.app.bot_username) or self.talks_to_bot(message, text):
-            await self.on_mention(message, actor, text)
+        if self.is_addressed(message, text):
+            await self.on_mention(message, actor, text, context)
+        elif self.worth_listening(actor, text):
+            self.spawn_ai(message, actor, text, context, addressed=False)
+
+    def remember_line(self, message: Message, actor: Actor | None, text: str) -> list[ChatLine]:
+        """Что писали в чате до этого сообщения; само сообщение запоминаем для следующих."""
+        now = self.tracker.now()
+        earlier = self.app.chat_log.recent(now)
+        user = message.from_user
+        if user is not None and not user.is_bot and not text.startswith("/"):
+            author = actor.name if actor is not None else user.full_name or "Участник"
+            self.app.chat_log.add(now, author, text)
+        return earlier
 
     def replies_to_bot(self, message: Message) -> bool:
         """Сообщение — ответ на одно из сообщений самого бота."""
@@ -237,6 +267,14 @@ class Handlers:
             return False  # другие боты и анонимные админы: с ними бот не переписывается
         return self.replies_to_bot(message) and not is_acknowledgement(text)
 
+    def is_addressed(self, message: Message, text: str) -> bool:
+        """К боту обратились: @именем, словом «бот» в начале фразы или ответом на его сообщение."""
+        return (
+            addressed_to(text, self.app.bot_username)
+            or called_by_name(text, self.app.bot_names)
+            or self.talks_to_bot(message, text)
+        )
+
     def replied_posts(self, message: Message) -> list[int]:
         """Посты из сообщения бота, на которое ответили; пусто, если ответ не на такое."""
         replied = message.reply_to_message
@@ -244,36 +282,160 @@ class Handlers:
             return []
         return self.tracker.state.message_posts(message.chat.id, replied.message_id) or []
 
-    async def on_mention(self, message: Message, actor: Actor | None, text: str) -> None:
+    def worth_listening(self, actor: Actor | None, text: str) -> bool:
+        """Стоит ли показать ИИ сообщение, которое боту не адресовали: похоже на отчёт о постах."""
+        app = self.app
+        if not app.ai_listen or actor is None or actor.role == Role.BOSS:
+            return False
+        if text.startswith("/") or not looks_like_work(text):
+            return False
+        if app.ai_waiting >= MAX_LISTEN_BACKLOG:
+            return False  # ИИ не успевает: пропускаем разговоры, вопросы к боту важнее
+        return app.ai_listen_allowed()
+
+    async def on_mention(
+        self,
+        message: Message,
+        actor: Actor | None,
+        text: str,
+        context: list[ChatLine] | None = None,
+    ) -> None:
         """К боту обратились, а фраза не похожа на отчёт о посте: отвечаем, а не молчим."""
         question = ask_text(text, self.app.bot_username)
         if question and self.app.ai_allowed():
-            self.app.spawn(self.answer_with_ai(message, actor, question, text))
+            self.spawn_ai(message, actor, question, context or [], addressed=True, original=text)
             return
         await self.answer_by_keywords(message, actor, text)
 
-    async def answer_with_ai(
-        self, message: Message, actor: Actor | None, question: str, text: str
+    def spawn_ai(
+        self,
+        message: Message,
+        actor: Actor | None,
+        text: str,
+        context: list[ChatLine],
+        *,
+        addressed: bool,
+        original: str | None = None,
     ) -> None:
-        """Вопрос по имени бота уходит в Gemini вместе со сводкой по постам; при сбое — команды."""
+        """Сообщение уходит на разбор в Gemini в фоне: чат при этом читается дальше."""
+        self.app.ai_waiting += 1
+        self.app.spawn(
+            self.interpret_with_ai(
+                message, actor, text, context, addressed=addressed, original=original or text
+            )
+        )
+
+    async def interpret_with_ai(
+        self,
+        message: Message,
+        actor: Actor | None,
+        text: str,
+        context: list[ChatLine],
+        *,
+        addressed: bool,
+        original: str,
+    ) -> None:
+        """Gemini решает: ответить, записать в трекер, уточнить или промолчать. Сообщения идут по
+        одному и по порядку, чтобы «беру пост» и «текст готов» не перепутались местами."""
+        app = self.app
+        try:
+            async with app.ai_lock:
+                if addressed:
+                    with contextlib.suppress(TelegramError):
+                        await app.bot.send_chat_action(
+                            message.chat.id, "typing", self.thread_of(message)
+                        )
+                result = await self.ask_ai(message, actor, text, context, addressed=addressed)
+                if result is not None:
+                    await self.carry_out(message, actor, result, original, addressed=addressed)
+                elif addressed:
+                    await self.answer_by_keywords(message, actor, original)
+        finally:
+            app.ai_waiting -= 1
+
+    async def ask_ai(
+        self,
+        message: Message,
+        actor: Actor | None,
+        text: str,
+        context: list[ChatLine],
+        *,
+        addressed: bool,
+    ) -> Interpretation | None:
         app = self.app
         assert app.ai is not None
-        with contextlib.suppress(TelegramError):
-            await app.bot.send_chat_action(message.chat.id, "typing", self.thread_of(message))
+        replied = message.reply_to_message
+        quoted = (
+            ((replied.text or replied.caption or "")[:QUOTE_LIMIT] or None) if replied else None
+        )
+        quoted_by = None
+        if replied is not None:
+            quoted_by = "бот" if self.replies_to_bot(message) else None
+            if quoted_by is None and replied.from_user is not None:
+                quoted_by = replied.from_user.full_name
+        request = Request(
+            text=text,
+            asker=actor,
+            addressed=addressed,
+            focus_ids=self.replied_posts(message),
+            recent=context,
+            quoted=quoted,
+            quoted_by=quoted_by,
+        )
         try:
-            answer = await app.ai.answer(
-                question, actor, app.parsed_kp, focus_ids=self.replied_posts(message)
-            )
+            result = await app.ai.interpret(request, app.parsed_kp)
         except AiError as error:
             app.ai_failed(error)
+            return None
         except Exception as error:
-            log.exception("Ответ ИИ не удалось подготовить")
+            log.exception("Сообщение не удалось разобрать с помощью ИИ")
             app.ai_failed(error)
-        else:
-            app.ai_succeeded()
-            await self.respond(message, Reply(answer))
+            return None
+        app.ai_succeeded()
+        log.info(
+            "ИИ разобрал сообщение (%s): %s, действий %s, уверенность %s",
+            "к боту" if addressed else "из общего чата",
+            result.kind,
+            len(result.actions),
+            "высокая" if result.confident else "обычная",
+        )
+        return result
+
+    async def carry_out(
+        self,
+        message: Message,
+        actor: Actor | None,
+        result: Interpretation,
+        text: str,
+        *,
+        addressed: bool,
+    ) -> None:
+        """Делает то, что понял ИИ. Без обращения к боту — только уверенные отчёты, молча иначе."""
+        if result.kind == "action":
+            can_write = actor is not None and actor.role != Role.BOSS
+            reply = None
+            if actor is not None and can_write and (addressed or result.confident):
+                reply = run_actions(
+                    self.tracker,
+                    actor,
+                    result.actions,
+                    addressed=addressed,
+                    msg_link=message_link(message.chat.id, message.message_id),
+                    text=text,
+                )
+            if reply is not None:
+                await self.respond(message, reply)
+                self.app.mark_dirty()
+            elif addressed:
+                note = views.NOT_RECORDED if can_write else views.NOT_ALLOWED
+                await self.respond(message, Reply(note))
             return
-        await self.answer_by_keywords(message, actor, text)
+        if not addressed:
+            return
+        if result.kind in ("answer", "clarify") and result.text:
+            await self.respond(message, Reply(to_html(result.text)))
+        else:
+            await self.answer_by_keywords(message, actor, text)
 
     async def answer_by_keywords(self, message: Message, actor: Actor | None, text: str) -> None:
         """Без ИИ: узнаём частые слова («задачи», «сегодня», «мои») или подсказываем команды."""

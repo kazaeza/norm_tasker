@@ -199,6 +199,7 @@ class Env:
     gemini_model: str | None = None  # GEMINI_MODEL: не задана — бот подберёт модель сам
     gemini_url: str | None = None  # GEMINI_URL: адрес API, если ключ выдал посредник
     ai_enabled: bool = True  # AI_ENABLED=0 выключает ИИ, не убирая ключ
+    ai_listen: bool = True  # AI_LISTEN=0: не разбирать сообщения, которые боту не адресованы
 
     @property
     def ai_on(self) -> bool:
@@ -261,6 +262,7 @@ def load_env(environ: dict[str, str] | None = None) -> Env:
         gemini_model=(env.get("GEMINI_MODEL") or "").strip() or None,
         gemini_url=(env.get("GEMINI_URL") or "").strip() or None,
         ai_enabled=(env.get("AI_ENABLED") or "1").strip().lower() not in OFF_WORDS,
+        ai_listen=(env.get("AI_LISTEN") or "1").strip().lower() not in OFF_WORDS,
     )
 
 

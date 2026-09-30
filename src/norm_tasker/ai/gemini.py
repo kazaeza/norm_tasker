@@ -1,4 +1,4 @@
-"""Клиент Gemini API: вопрос текстом — ответ текстом.
+"""Клиент Gemini API: вопрос текстом — ответ текстом или JSON.
 
 Ключ уходит заголовком, а не в адресе, чтобы не попасть в журнал и в тексты ошибок. Имена моделей
 у Google меняются, поэтому по умолчанию бот перебирает список и запоминает первую рабочую.
@@ -128,16 +128,24 @@ class GeminiClient:
         self.transport: AiTransport = transport or HttpAiTransport()
 
     async def ask(
-        self, system: str, prompt: str, *, max_tokens: int = 4096, temperature: float | None = None
+        self,
+        system: str,
+        prompt: str,
+        *,
+        max_tokens: int = 4096,
+        temperature: float | None = None,
+        json_mode: bool = False,
     ) -> str:
+        """Один запрос. json_mode просит Gemini ответить JSON-объектом, а не свободным текстом."""
         payload = {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {"maxOutputTokens": max_tokens},
         }
-        if (
-            temperature is not None
-        ):  # у новых моделей Google советует оставлять значение по умолчанию
+        if json_mode:
+            payload["generationConfig"]["responseMimeType"] = "application/json"
+        if temperature is not None:
+            # У новых моделей Google советует оставлять значение по умолчанию.
             payload["generationConfig"]["temperature"] = temperature
         headers = {"x-goog-api-key": self._key, "Content-Type": "application/json"}
         models = [self.model] if self.model else list(self._models)

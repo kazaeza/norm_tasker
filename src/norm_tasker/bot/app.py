@@ -19,8 +19,10 @@ from norm_tasker.ai.gemini import AiError, GeminiClient
 from norm_tasker.bot.handlers import Handlers
 from norm_tasker.bot.notify import comment_reply, sync_messages
 from norm_tasker.bot.telegram import Sender
-from norm_tasker.bot.views import RuntimeInfo
+from norm_tasker.bot.views import AI_NOTICE, RuntimeInfo
 from norm_tasker.calendar_ru import build_calendar, refresh_calendar
+from norm_tasker.chat.asks import bot_call_names
+from norm_tasker.chat.log import ChatLog
 from norm_tasker.config import Env, Settings
 from norm_tasker.digest.board import build_board
 from norm_tasker.digest.reminders import due_rules, mark_done
@@ -48,6 +50,7 @@ DOWNTIME_HOURS = 20  # Telegram хранит апдейты для бота 24 �
 KP_FAILURES_BEFORE_ALERT = 6
 FIRST_SYNC_WAIT_MINUTES = 5
 AI_CALLS_PER_HOUR = 60  # больше вопросов к ИИ в час бот не отправляет: защита от спама и расходов
+AI_LISTEN_PER_HOUR = 120  # то же для сообщений чата, которые боту не адресовали
 
 
 def self_kp_ok(client: Any, env: Env) -> bool:
@@ -80,9 +83,14 @@ class App:
         )
         self._background: set[asyncio.Task[Any]] = set()
         self._ai_calls: deque[float] = deque()
+        self._listen_calls: deque[float] = deque()
+        self.ai_lock = asyncio.Lock()  # ИИ разбирает сообщения по одному и по порядку
+        self.ai_waiting = 0  # сколько сообщений ждёт ответа ИИ
+        self.chat_log = ChatLog()
         self.parsed_kp = None
         self.bot_id: int | None = None
         self.bot_username: str | None = None
+        self.bot_names: tuple[str, ...] = ()  # как люди зовут бота в начале фразы
         self.handlers = Handlers(self)
         self._kp_hash: str | None = None
         self._kp_failures = 0
@@ -121,18 +129,33 @@ class App:
         while self._background:
             await asyncio.gather(*self._background, return_exceptions=True)
 
+    @property
+    def ai_listen(self) -> bool:
+        """ИИ разбирает и сообщения, которые боту не адресованы (AI_LISTEN=0 выключает)."""
+        return self.ai is not None and self.env.ai_listen
+
+    @staticmethod
+    def _within_budget(calls: deque[float], limit: int, what: str) -> bool:
+        now = time.monotonic()
+        while calls and now - calls[0] > 3600:
+            calls.popleft()
+        if len(calls) >= limit:
+            log.warning("Лимит запросов к ИИ (%s: %s в час) исчерпан", what, limit)
+            return False
+        calls.append(now)
+        return True
+
     def ai_allowed(self) -> bool:
         """Можно ли сейчас отправить вопрос ИИ: ключ есть и час не выбран до конца."""
-        if self.ai is None:
-            return False
-        now = time.monotonic()
-        while self._ai_calls and now - self._ai_calls[0] > 3600:
-            self._ai_calls.popleft()
-        if len(self._ai_calls) >= AI_CALLS_PER_HOUR:
-            log.warning("Лимит вопросов к ИИ (%s в час) исчерпан", AI_CALLS_PER_HOUR)
-            return False
-        self._ai_calls.append(now)
-        return True
+        return self.ai is not None and self._within_budget(
+            self._ai_calls, AI_CALLS_PER_HOUR, "вопросы боту"
+        )
+
+    def ai_listen_allowed(self) -> bool:
+        """То же для сообщений чата, которые боту не адресовали: у них свой лимит."""
+        return self.ai_listen and self._within_budget(
+            self._listen_calls, AI_LISTEN_PER_HOUR, "сообщения чата"
+        )
 
     def ai_succeeded(self) -> None:
         if self.ai is not None:
@@ -163,12 +186,14 @@ class App:
         me = await self._get_me()
         self.bot_id = me.id
         self.bot_username = me.username
+        self.bot_names = bot_call_names(me.username, me.first_name)
         self.info.started_at = self.tracker.now()
         log.info("Бот @%s запущен", me.username)
         if self.settings.chat_id is None:
             self._warn("chat_id не задан в config.yaml: бот отвечает только на /id")
         await self.check_rights(me.can_read_all_group_messages)
         await self.notice_downtime()
+        await self.announce_ai_listening()
 
     async def _get_me(self):
         """Ждёт, пока Telegram станет доступен: сразу после запуска сеть бывает не готова."""
@@ -199,6 +224,15 @@ class App:
             )
         elif member.status == "administrator" and not member.can_pin_messages:
             self._warn("Права бота: нет права закреплять сообщения — доску закрепить не выйдет")
+
+    async def announce_ai_listening(self) -> None:
+        """Один раз предупреждает команду: сообщения про посты разбирает ИИ, они уходят в Gemini."""
+        if not self.ai_listen or self.settings.chat_id is None:
+            return
+        if self.tracker.state.get_meta("ai_listen_notice"):
+            return
+        if await self.sender.send(Reply(AI_NOTICE, kind="notice")) is not None:
+            self.tracker.state.set_meta("ai_listen_notice", self.tracker.today().isoformat())
 
     async def notice_downtime(self) -> None:
         heartbeat = self.tracker.state.get_meta("heartbeat")

@@ -1,12 +1,15 @@
 import asyncio
+import dataclasses
+import threading
 from datetime import date, datetime, timedelta
 
 import pytest
 
-from ai_fixture import KEY, FakeTransport, answer, error_body
+from ai_fixture import KEY, FakeTransport, answer, error_body, verdict
 from kp_fixture import build_kp, standard_kp
 from norm_tasker.ai.assistant import Assistant
 from norm_tasker.ai.gemini import GeminiClient
+from norm_tasker.bot import views
 from norm_tasker.bot.app import KP_FAILURES_BEFORE_ALERT, App
 from norm_tasker.config import Env
 from norm_tasker.google.client import GoogleError
@@ -740,7 +743,7 @@ async def test_reply_to_the_bot_is_answered_by_gemini_about_that_post(ai_ready, 
     app = ai_ready
     post = friday_post(app)
     replied = linked_bot_message(app, post)
-    replied.text = "ТЕКСТ_СООБЩЕНИЯ_БОТА_НЕ_УХОДИТ_В_GEMINI"
+    replied.text = "Кто возьмёт пятничный пост?"
     gemini.replies.append((200, answer("Срок — до среды")))
     await ask_bot(app, "а когда срок?", reply_to=replied)
     assert "Срок — до среды" in session.last_text()
@@ -749,8 +752,9 @@ async def test_reply_to_the_bot_is_answered_by_gemini_about_that_post(ai_ready, 
     assert "ВОПРОС\nа когда срок?" in prompt
     focus = prompt.split("Вопрос задан в ответ на сообщение бота")[1]
     assert f"№{post.id} | пт 02.10" in focus
-    assert "ТЕКСТ_СООБЩЕНИЯ_БОТА" not in prompt  # называем посты, а не пересказываем сообщение
-    # Сообщение, о постах которого бот не помнит: блока нет.
+    # Владелец разрешил отправлять в Gemini всё: само сообщение тоже уходит, с указанием автора.
+    assert "СООБЩЕНИЕ, НА КОТОРОЕ ОТВЕТИЛИ (бот)\nКто возьмёт пятничный пост?" in prompt
+    # Сообщение, о постах которого бот не помнит: блока с постами нет.
     gemini.replies.append((200, answer("ок")))
     await ask_bot(app, "что нового?", reply_to=bot_message(778))
     assert "Вопрос задан в ответ" not in gemini.prompt()
@@ -807,6 +811,260 @@ async def test_startup_check_reports_the_model_or_the_error(ai_ready, session, g
     session.clear()
     await say(app, "/status", ALPHA)
     assert "⚠️ ИИ не отвечает: Gemini недоступен из региона" in session.last_text()
+
+
+# --- ИИ понимает обычные фразы --------------------------------------------------------------
+
+BOSS = {"user_id": 104, "username": "boss_user", "name": "Т"}
+STRANGER = {"user_id": 999, "username": "stranger_x", "name": "Гость"}
+REPORT = "по пятничному посту я закончила, теперь у Алисы"  # правила такую фразу не узнают
+
+
+def stage_verdict(post, stage, confidence="high"):
+    action = {"type": "stage", "posts": [post.id], "stage": stage}
+    return verdict(kind="action", confidence=confidence, actions=[action])
+
+
+class GatedTransport(FakeTransport):
+    """Не отвечает, пока тест не разрешит: видно, что бот делает, пока Gemini «думает»."""
+
+    def __init__(self, *replies):
+        super().__init__(*replies)
+        self.gate = threading.Event()
+
+    def post(self, url, headers, payload, timeout):
+        assert self.gate.wait(10)
+        return super().post(url, headers, payload, timeout)
+
+
+async def test_done_in_reply_to_the_bot_is_understood_by_gemini(ai_ready, session, gemini):
+    app = ai_ready
+    post = friday_post(app)
+    await say(app, "беру пост на пятницу", BETA)
+    bot_reply = bot_message(session._next_id)
+    session.clear()
+    gemini.replies.append(stage_verdict(post, "text_shown"))
+    await ask_bot(app, "готово", BETA, reply_to=bot_reply)
+    assert app.tracker.get(post.id).stage == Stage.TEXT_SHOWN
+    sent = session.named("SendMessage")[-1]
+    assert "текст у клиента" in sent["text"]  # записанное видно всем словами, а не одним 👍
+    assert sent["reply_markup"]["inline_keyboard"][0][-1]["callback_data"].startswith("undo:")
+    prompt = gemini.prompt()
+    assert "РЕЖИМ\nК боту обратились напрямую" in prompt and "ВОПРОС\nготово" in prompt
+    assert f"№{post.id} | пт 02.10" in prompt.split("Вопрос задан в ответ")[1]
+    assert session.named("SendChatAction")[0]["action"] == "typing"
+
+
+async def test_request_by_the_bots_name_is_carried_out_and_can_be_undone(ai_ready, session, gemini):
+    app = ai_ready
+    post = friday_post(app)
+    assert app.bot_names == ("бот", "Тест", "norm_test")
+    gemini.replies.append(stage_verdict(post, "at_designer"))
+    await ask_bot(app, "бот, закинь пятничный пост дизайнеру", ALPHA)
+    assert app.tracker.get(post.id).stage == Stage.AT_DESIGNER
+    assert "у дизайнера" in session.last_text()
+    session.clear()
+    await feed(app, callback_update(last_undo(app, post), message_id=session._next_id, **ALPHA))
+    assert app.tracker.get(post.id).stage == Stage.NEW
+
+
+def last_undo(app, post):
+    return f"undo:{app.tracker.history(post.id)[0].id}"
+
+
+async def test_gemini_can_answer_or_ask_a_clarifying_question(ai_ready, session, gemini):
+    app = ai_ready
+    gemini.replies.append(verdict(kind="clarify", text="Про какой пост: №1 или №2?"))
+    await ask_bot(app, "бот, отметь что готово", ALPHA)
+    assert session.last_text() == "Про какой пост: №1 или №2?"
+    assert friday_post(app).stage == Stage.NEW
+    gemini.replies.append(verdict(kind="answer", text="У вас **один** пост & всё"))
+    await ask_bot(app, "бот, что у меня?", ALPHA)
+    assert session.last_text() == "У вас <b>один</b> пост &amp; всё"
+    gemini.replies.append(verdict(kind="ignore"))  # позвали, а модель не поняла: подсказка команд
+    await ask_bot(app, "бот, ну", ALPHA)
+    assert "Не понял" in session.last_text()
+
+
+async def test_report_in_the_general_chat_is_recorded_only_when_gemini_is_sure(
+    ai_ready, session, gemini
+):
+    app = ai_ready
+    post = friday_post(app)
+    await say(app, "беру пост на пятницу", ALPHA)
+    session.clear()
+    for quiet in (
+        stage_verdict(post, "text_shown", confidence="low"),  # не уверен
+        verdict(kind="answer", text="Поздравляю!"),  # в общем чате бот не болтает
+        verdict(kind="clarify", text="Какой пост?"),  # и не переспрашивает
+        verdict(kind="ignore"),
+    ):
+        gemini.replies.append(quiet)
+        await ask_bot(app, REPORT, ALPHA)
+    assert session.named("SendMessage") == [] and session.named("SendChatAction") == []
+    assert app.tracker.get(post.id).stage == Stage.TAKEN
+    assert len(gemini.calls) == 4
+
+    gemini.replies.append(stage_verdict(post, "text_shown"))
+    await ask_bot(app, REPORT, ALPHA)
+    assert app.tracker.get(post.id).stage == Stage.TEXT_SHOWN
+    assert "текст у клиента" in session.last_text()
+    assert session.named("SendMessage")[-1]["reply_parameters"]["message_id"]
+    prompt = gemini.prompt()
+    assert "РЕЖИМ\nК боту не обращались" in prompt
+    assert f"СООБЩЕНИЕ ИЗ ЧАТА\n{REPORT}" in prompt and "Пишет: Копирайтер Альфа" in prompt
+    assert app.tracker.history(post.id)[0].source == "chat"
+
+
+async def test_chatter_and_the_off_switch_keep_messages_away_from_gemini(ai_ready, session, gemini):
+    app = ai_ready
+    for text in ("всем привет, как выходные?", "кто на обед?", "спасибо", "ок", "😂😂"):
+        await ask_bot(app, text, ALPHA)
+    await ask_bot(app, "беру пост на пятницу", ALPHA)  # это и так понимают правила
+    await ask_bot(app, "текст на пятницу готов, отправил клиенту", ALPHA)
+    assert gemini.calls == []
+    app.env = dataclasses.replace(app.env, ai_listen=False)  # AI_LISTEN=0
+    await ask_bot(app, REPORT, BETA)
+    assert gemini.calls == []
+    gemini.replies.append(verdict(kind="answer", text="Слушаю"))  # но на обращение бот отвечает
+    await ask_bot(app, "бот, привет", ALPHA)
+    assert session.last_text() == "Слушаю"
+
+
+async def test_boss_and_strangers_are_not_read_and_cannot_record(ai_ready, session, gemini):
+    app = ai_ready
+    app.settings.unknown_role = None
+    post = friday_post(app)
+    for who in (BOSS, STRANGER):
+        await ask_bot(app, REPORT, who)
+    assert gemini.calls == []
+    for who in (BOSS, STRANGER):
+        gemini.replies.append(stage_verdict(post, "text_shown"))
+        await ask_bot(app, "бот, по пятничному всё готово", who)
+        assert session.last_text() == views.NOT_ALLOWED
+    assert friday_post(app).stage == Stage.NEW
+
+
+async def test_recent_chat_and_the_quoted_message_go_along(ai_ready, gemini):
+    app = ai_ready
+    gemini.replies.extend([verdict(kind="ignore"), verdict(kind="ignore")])
+    await ask_bot(app, "кто-нибудь брал пост про фильм и профессии?", BETA)
+    assert "ПОСЛЕДНИЕ СООБЩЕНИЯ ЧАТА" not in gemini.prompt()
+    await ask_bot(app, "скоро покажу клиенту текст про фильм", ALPHA)
+    assert (
+        "ПОСЛЕДНИЕ СООБЩЕНИЯ ЧАТА (старые первыми)\n"
+        "[10:00] Копирайтер Бета: кто-нибудь брал пост про фильм и профессии?"
+    ) in gemini.prompt()
+    colleague = Message(
+        message_id=888,
+        chat=Chat(id=WORK_CHAT, type="supergroup"),
+        from_user=make_user(102, "cw_beta", "Бета"),
+        text="кто взял пост?",
+    )
+    gemini.replies.append(verdict(kind="answer", text="Никто"))
+    await ask_bot(app, "@norm_test_bot это про какой пост?", ALPHA, reply_to=colleague)
+    assert "СООБЩЕНИЕ, НА КОТОРОЕ ОТВЕТИЛИ (Бета)\nкто взял пост?" in gemini.prompt()
+
+
+async def test_new_post_by_request_and_a_request_that_cannot_be_done(ai_ready, session, gemini):
+    app = ai_ready
+    add = {"type": "add_post", "date": "2026-10-15", "topic": "Акция недели"}
+    gemini.replies.append(verdict(kind="action", confidence="high", actions=[add]))
+    await ask_bot(app, "бот, добавь пост на 15.10 про акцию недели", ALPHA)
+    [added] = app.tracker.posts_on(date(2026, 10, 15))
+    assert added.topic == "Акция недели" and session.last_text().startswith("➕ Добавлен пост")
+
+    ghost = {"type": "stage", "posts": [9999], "stage": "text_ok"}
+    gemini.replies.append(verdict(kind="action", confidence="high", actions=[ghost]))
+    await ask_bot(app, "бот, по посту 9999 клиент одобрил текст", ALPHA)
+    assert session.last_text() == views.NOT_RECORDED
+
+
+async def test_same_request_in_the_general_chat_cannot_add_posts(ai_ready, session, gemini):
+    app = ai_ready
+    add = {"type": "add_post", "date": "2026-10-15", "topic": "Случайный"}
+    gemini.replies.append(verdict(kind="action", confidence="high", actions=[add]))
+    await ask_bot(app, "надо бы добавить пост на 15.10 про акцию", ALPHA)
+    assert app.tracker.posts_on(date(2026, 10, 15)) == [] and session.named("SendMessage") == []
+
+
+async def test_gemini_failure_while_listening_is_silent_but_visible_in_status(
+    ai_ready, session, gemini
+):
+    app = ai_ready
+    gemini.replies.append((429, error_body("RESOURCE_EXHAUSTED", "quota", 429)))
+    await ask_bot(app, REPORT, ALPHA)
+    assert session.named("SendMessage") == []
+    await say(app, "/status", ALPHA)
+    assert "исчерпан лимит запросов" in session.last_text()
+
+
+async def test_messages_wait_for_gemini_one_by_one_and_in_order(ready, session):
+    transport = GatedTransport((200, answer("Первый")), (200, answer("Второй")))
+    ready.ai = Assistant(GeminiClient(KEY, transport=transport), ready.tracker)
+    await say(ready, "@norm_test_bot первый вопрос", ALPHA)
+    await say(ready, "@norm_test_bot второй вопрос", BETA)
+    assert ready.ai_waiting == 2 and session.sent_texts() == []
+    transport.gate.set()
+    await ready.wait_background()
+    assert session.sent_texts() == ["Первый", "Второй"] and ready.ai_waiting == 0
+
+
+async def test_busy_gemini_does_not_pile_up_chatter_but_answers_questions(
+    ready, session, monkeypatch
+):
+    monkeypatch.setattr("norm_tasker.bot.handlers.MAX_LISTEN_BACKLOG", 1)
+    transport = GatedTransport(verdict(kind="ignore"), (200, answer("Отвечаю")))
+    ready.ai = Assistant(GeminiClient(KEY, transport=transport), ready.tracker)
+    await say(ready, REPORT, ALPHA)  # уходит в Gemini и ждёт ответа
+    await say(ready, REPORT, BETA)  # Gemini занят: разговор пропускаем
+    await say(ready, "@norm_test_bot вопрос важнее", ALPHA)  # вопрос к боту принимается всегда
+    transport.gate.set()
+    await ready.wait_background()
+    assert len(transport.calls) == 2 and session.last_text() == "Отвечаю"
+
+
+async def test_listening_has_its_own_hourly_limit(ai_ready, session, gemini, monkeypatch):
+    app = ai_ready
+    monkeypatch.setattr("norm_tasker.bot.app.AI_LISTEN_PER_HOUR", 1)
+    gemini.replies.append(verdict(kind="ignore"))
+    for _ in range(3):
+        await ask_bot(app, REPORT, ALPHA)
+    assert len(gemini.calls) == 1
+    gemini.replies.append((200, answer("Отвечаю")))  # вопросы к боту считаются отдельно
+    await ask_bot(app, "@norm_test_bot привет", ALPHA)
+    assert session.last_text() == "Отвечаю"
+
+
+async def test_team_is_told_once_that_ai_reads_the_chat(app, session, gemini):
+    app.ai = Assistant(GeminiClient(KEY, transport=gemini), app.tracker)
+    await app.startup()
+    notices = [t for t in session.sent_texts() if "Gemini, Google" in t]
+    assert len(notices) == 1 and "Пишите мне как коллеге" in notices[0]
+    await app.startup()  # перезапуск: второй раз не предупреждаем
+    assert len([t for t in session.sent_texts() if "Gemini, Google" in t]) == 1
+
+
+async def test_no_warning_when_the_ai_does_not_read_the_chat(app, session, gemini):
+    app.ai = Assistant(GeminiClient(KEY, transport=gemini), app.tracker)
+    app.env = dataclasses.replace(app.env, ai_listen=False)
+    await app.startup()
+    assert not [t for t in session.sent_texts() if "Gemini" in t]
+
+
+async def test_help_and_status_tell_how_to_talk_to_the_bot(ready, session, gemini):
+    app = ready
+    await say(app, "/help", ALPHA)
+    assert "позовите меня по имени или ответьте" in session.last_text()
+    app.ai = Assistant(GeminiClient(KEY, transport=gemini), app.tracker)
+    app.info.ai_configured = True
+    await say(app, "/help", ALPHA)
+    assert "говорите со мной как с коллегой" in session.last_text()
+    await say(app, "/status", ALPHA)
+    assert "Читаю сообщения чата про посты и записываю отчёты сам" in session.last_text()
+    app.env = dataclasses.replace(app.env, ai_listen=False)
+    await say(app, "/status", ALPHA)
+    assert "Сообщения, обращённые не ко мне, не читаю" in session.last_text()
 
 
 async def test_status_says_when_ai_is_off(ready, session):

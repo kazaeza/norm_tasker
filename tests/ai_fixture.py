@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import json
+
 KEY = "AIza_test_key_not_real_0123456"
 
 
 def answer(text: str) -> dict:
     return {"candidates": [{"content": {"parts": [{"text": text}]}, "finishReason": "STOP"}]}
+
+
+def verdict(**fields) -> tuple[int, dict]:
+    """Ответ Gemini в формате бота: JSON с решением (kind, text, confidence, actions)."""
+    return 200, answer(json.dumps(fields, ensure_ascii=False))
 
 
 def error_body(status: str, message: str, code: int = 400) -> dict:
