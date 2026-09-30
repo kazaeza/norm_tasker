@@ -19,13 +19,24 @@ from norm_tasker.kp.parser import parse_kp
 from norm_tasker.tracker.stages import LABEL, stage_from_kp_status
 
 TOKEN = re.compile(r"\d{6,}:[\w-]{30,}")  # в адресах токен идёт сразу после «bot»
+GOOGLE_KEY = re.compile(r"AIza[\w-]{20,}")  # так начинаются ключи Google, в том числе Gemini
+SECRETS: set[str] = set()  # значения ключей, которые нельзя показывать в журнале ни в каком виде
+
+
+def hide_secret(value: str | None) -> None:
+    """Ключ будет скрыт в журнале, даже если он не похож на известные форматы (ключ посредника)."""
+    if value and len(value) >= 8:
+        SECRETS.add(value)
 
 
 class RedactingFormatter(logging.Formatter):
-    """Токен бота не должен попасть в журнал, даже если он окажется в тексте ошибки."""
+    """Токен бота и ключи не должны попасть в журнал, даже если окажутся в тексте ошибки."""
 
     def format(self, record: logging.LogRecord) -> str:
-        return TOKEN.sub("<токен скрыт>", super().format(record))
+        text = GOOGLE_KEY.sub("<ключ скрыт>", TOKEN.sub("<токен скрыт>", super().format(record)))
+        for secret in SECRETS:
+            text = text.replace(secret, "<ключ скрыт>")
+        return text
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -141,6 +152,8 @@ def main(argv: list[str] | None = None) -> int:
     except (FileNotFoundError, ValueError) as error:
         print(f"Ошибка настроек: {error}", file=sys.stderr)
         return 2
+    hide_secret(env.bot_token)
+    hide_secret(env.gemini_key)
     if args.command == "parse":
         return cmd_parse(env, settings, args.file, args.weeks, args.since)
     if args.command == "health":

@@ -7,10 +7,15 @@ import contextlib
 import hashlib
 import logging
 import signal
+import time
+from collections import deque
+from collections.abc import Coroutine
 from datetime import datetime, timedelta
 from html import escape
 from typing import Any
 
+from norm_tasker.ai.assistant import Assistant
+from norm_tasker.ai.gemini import AiError, GeminiClient
 from norm_tasker.bot.handlers import Handlers
 from norm_tasker.bot.notify import comment_reply, sync_messages
 from norm_tasker.bot.telegram import Sender
@@ -42,6 +47,7 @@ CALENDAR_REFRESH_SECONDS = 24 * 3600
 DOWNTIME_HOURS = 20  # Telegram хранит апдейты для бота 24 часа
 KP_FAILURES_BEFORE_ALERT = 6
 FIRST_SYNC_WAIT_MINUTES = 5
+AI_CALLS_PER_HOUR = 60  # больше вопросов к ИИ в час бот не отправляет: защита от спама и расходов
 
 
 def self_kp_ok(client: Any, env: Env) -> bool:
@@ -57,6 +63,7 @@ class App:
         tracker: Tracker,
         google: GoogleClient | None = None,
         kp_client: Any = None,
+        ai: Assistant | None = None,
     ) -> None:
         self.env = env
         self.settings = settings
@@ -64,11 +71,15 @@ class App:
         self.tracker = tracker
         self.google = google
         self.kp_client = kp_client or google  # откуда брать КП: с ключом или по публичной ссылке
+        self.ai = ai
         self.sender = Sender(bot, tracker, settings)
         self.info = RuntimeInfo(
             google_configured=self_kp_ok(kp_client or google, env),
             tracker_copy_configured=google is not None and bool(env.tracker_spreadsheet_id),
+            ai_configured=ai is not None,
         )
+        self._background: set[asyncio.Task[Any]] = set()
+        self._ai_calls: deque[float] = deque()
         self.parsed_kp = None
         self.bot_id: int | None = None
         self.bot_username: str | None = None
@@ -91,6 +102,62 @@ class App:
         log.warning(text)
         if text not in self.info.warnings:
             self.info.warnings.append(text)
+
+    # --- фоновые задачи и ИИ --------------------------------------------------------------------
+    def spawn(self, work: Coroutine[Any, Any, Any]) -> None:
+        """Запускает работу в фоне, чтобы долгий ответ ИИ не задерживал разбор чата."""
+        task = asyncio.create_task(work)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+        task.add_done_callback(self._log_background)
+
+    @staticmethod
+    def _log_background(task: asyncio.Task[Any]) -> None:
+        if not task.cancelled() and task.exception() is not None:
+            log.error("Фоновая задача завершилась ошибкой", exc_info=task.exception())
+
+    async def wait_background(self) -> None:
+        """Дожидается фоновых задач (нужно тестам)."""
+        while self._background:
+            await asyncio.gather(*self._background, return_exceptions=True)
+
+    def ai_allowed(self) -> bool:
+        """Можно ли сейчас отправить вопрос ИИ: ключ есть и час не выбран до конца."""
+        if self.ai is None:
+            return False
+        now = time.monotonic()
+        while self._ai_calls and now - self._ai_calls[0] > 3600:
+            self._ai_calls.popleft()
+        if len(self._ai_calls) >= AI_CALLS_PER_HOUR:
+            log.warning("Лимит вопросов к ИИ (%s в час) исчерпан", AI_CALLS_PER_HOUR)
+            return False
+        self._ai_calls.append(now)
+        return True
+
+    def ai_succeeded(self) -> None:
+        if self.ai is not None:
+            self.info.ai_error = None
+            self.info.ai_model = self.ai.model
+            self.info.ai_ok_at = self.tracker.now()
+
+    def ai_failed(self, error: BaseException) -> None:
+        log.warning("Gemini не ответил: %s", error)
+        self.info.ai_error = str(error) or type(error).__name__
+
+    async def check_ai(self) -> None:
+        """Пробный запрос при запуске: ошибка ключа или модели видна в /status и в журнале."""
+        if self.ai is None:
+            return
+        try:
+            await self.ai.ping()
+        except AiError as error:
+            self.ai_failed(error)
+        except Exception as error:
+            log.exception("Проверка Gemini закончилась сбоем")
+            self.ai_failed(error)
+        else:
+            self.ai_succeeded()
+            log.info("Gemini отвечает, модель %s", self.ai.model)
 
     async def startup(self) -> None:
         me = await self._get_me()
@@ -414,6 +481,7 @@ class App:
             asyncio.create_task(self._board_loop()),
             asyncio.create_task(self._sheet_loop()),
         ]
+        self.spawn(self.check_ai())
         polling = asyncio.create_task(
             poll_updates(
                 self.bot,
@@ -442,9 +510,9 @@ class App:
                 raise
         finally:
             polling.cancel()
-            for task in self._tasks:
+            for task in [*self._tasks, *self._background]:
                 task.cancel()
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+            await asyncio.gather(*self._tasks, *self._background, return_exceptions=True)
             await self.bot.close()
 
     # --- с какого обновления читать после перезапуска -----------------------------------------
@@ -481,4 +549,12 @@ def build_app(env: Env, settings: Settings) -> App:
         )
         kp_client = PublicSheet()
     bot = Api(env.bot_token, base_url=env.telegram_api_url or API_URL)
-    return App(env, settings, bot, tracker, google, kp_client)
+    ai = None
+    if env.ai_on and env.gemini_key:
+        client = GeminiClient(env.gemini_key, model=env.gemini_model, base_url=env.gemini_url)
+        ai = Assistant(client, tracker)
+    elif env.gemini_key:
+        log.info("Ключ Gemini есть, но ИИ выключен переменной AI_ENABLED")
+    else:
+        log.info("Ключа Gemini (GEMINI_API) нет: ИИ выключен")
+    return App(env, settings, bot, tracker, google, kp_client, ai)

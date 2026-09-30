@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
+from norm_tasker.ai.assistant import ask_text
+from norm_tasker.ai.gemini import AiError
 from norm_tasker.bot import views
 from norm_tasker.bot.telegram import message_link
 from norm_tasker.chat.actions import handle_callback, handle_message
@@ -220,6 +223,35 @@ class Handlers:
 
     async def on_mention(self, message: Message, actor: Actor | None, text: str) -> None:
         """Бота позвали по имени, а фраза не похожа на отчёт о посте: отвечаем, а не молчим."""
+        question = ask_text(text, self.app.bot_username)
+        if question and self.app.ai_allowed():
+            self.app.spawn(self.answer_with_ai(message, actor, question, text))
+            return
+        await self.answer_by_keywords(message, actor, text)
+
+    async def answer_with_ai(
+        self, message: Message, actor: Actor | None, question: str, text: str
+    ) -> None:
+        """Вопрос по имени бота уходит в Gemini вместе со сводкой по постам; при сбое — команды."""
+        app = self.app
+        assert app.ai is not None
+        with contextlib.suppress(TelegramError):
+            await app.bot.send_chat_action(message.chat.id, "typing", self.thread_of(message))
+        try:
+            answer = await app.ai.answer(question, actor, app.parsed_kp)
+        except AiError as error:
+            app.ai_failed(error)
+        except Exception as error:
+            log.exception("Ответ ИИ не удалось подготовить")
+            app.ai_failed(error)
+        else:
+            app.ai_succeeded()
+            await self.respond(message, Reply(answer))
+            return
+        await self.answer_by_keywords(message, actor, text)
+
+    async def answer_by_keywords(self, message: Message, actor: Actor | None, text: str) -> None:
+        """Без ИИ: узнаём частые слова («задачи», «сегодня», «мои») или подсказываем команды."""
         name = classify_ask(text, self.app.bot_username)
         handler = self.commands.get(name) if name else None
         if handler is not None and (name != "my" or actor is not None):

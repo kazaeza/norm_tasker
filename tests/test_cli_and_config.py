@@ -168,3 +168,37 @@ def test_bot_token_never_reaches_the_log():
     )
     formatted = RedactingFormatter("%(message)s").format(record)
     assert token not in formatted and "<токен скрыт>" in formatted
+
+
+def test_gemini_settings_come_from_the_environment():
+    env = load_env({"GEMINI_API": " key123456 "})
+    assert env.gemini_key == "key123456" and env.ai_on
+    assert env.gemini_model is None and env.gemini_url is None
+    assert load_env({"GEMINI_API_KEY": "abc"}).gemini_key == "abc"
+    assert load_env({"GEMINI_API": "abc", "GEMINI_API_KEY": "zzz"}).gemini_key == "abc"
+    custom = load_env(
+        {"GEMINI_API": "a", "GEMINI_MODEL": "gemini-x", "GEMINI_URL": "https://p.example"}
+    )
+    assert custom.gemini_model == "gemini-x" and custom.gemini_url == "https://p.example"
+    for off in ("0", "false", "Нет", "OFF"):
+        assert not load_env({"GEMINI_API": "abc", "AI_ENABLED": off}).ai_on
+    assert not load_env({}).ai_on and not load_env({"GEMINI_API": "   "}).ai_on
+
+
+def test_gemini_keys_are_hidden_in_the_log():
+    import logging
+
+    from norm_tasker.__main__ import SECRETS, RedactingFormatter, hide_secret
+
+    google = "AIza_another_fake_key_00000000"
+    other = "proxy-secret-value-123"
+    hide_secret(other)
+    try:
+        record = logging.LogRecord(
+            "x", logging.ERROR, __file__, 1, "ключ %s и %s", (google, other), None
+        )
+        formatted = RedactingFormatter("%(message)s").format(record)
+        assert google not in formatted and other not in formatted
+        assert formatted.count("<ключ скрыт>") == 2
+    finally:
+        SECRETS.discard(other)

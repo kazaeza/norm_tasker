@@ -200,6 +200,16 @@ class Api:
             },
         )
 
+    async def send_chat_action(
+        self, chat_id: int, action: str = "typing", thread_id: int | None = None
+    ) -> None:
+        """«Печатает…» в чате: показывает, что бот думает над ответом."""
+        await self.call(
+            "sendChatAction",
+            {"chat_id": chat_id, "action": action, "message_thread_id": thread_id},
+            timeout=10,
+        )
+
     async def pin_chat_message(self, chat_id: int, message_id: int, *, silent: bool = True) -> None:
         await self.call(
             "pinChatMessage",

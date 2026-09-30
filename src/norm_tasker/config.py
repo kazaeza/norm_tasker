@@ -195,6 +195,14 @@ class Env:
     chat_id: int | None = None  # CHAT_ID и THREAD_ID важнее значений из настроек
     thread_id: int | None = None
     telegram_api_url: str | None = None  # свой адрес Bot API, если api.telegram.org недоступен
+    gemini_key: str | None = None  # GEMINI_API (или GEMINI_API_KEY): без ключа ИИ выключен
+    gemini_model: str | None = None  # GEMINI_MODEL: не задана — бот подберёт модель сам
+    gemini_url: str | None = None  # GEMINI_URL: адрес API, если ключ выдал посредник
+    ai_enabled: bool = True  # AI_ENABLED=0 выключает ИИ, не убирая ключ
+
+    @property
+    def ai_on(self) -> bool:
+        return self.ai_enabled and bool(self.gemini_key)
 
     @property
     def db_path(self) -> Path:
@@ -203,6 +211,9 @@ class Env:
     @property
     def has_config(self) -> bool:
         return self.config_text is not None or self.config_path.exists()
+
+
+OFF_WORDS = {"0", "false", "no", "off", "нет", "выкл"}
 
 
 def _env_int(env: dict[str, str], name: str) -> int | None:
@@ -246,6 +257,10 @@ def load_env(environ: dict[str, str] | None = None) -> Env:
         chat_id=_env_int(env, "CHAT_ID"),
         thread_id=_env_int(env, "THREAD_ID"),
         telegram_api_url=env.get("TELEGRAM_API_URL") or None,
+        gemini_key=(env.get("GEMINI_API") or env.get("GEMINI_API_KEY") or "").strip() or None,
+        gemini_model=(env.get("GEMINI_MODEL") or "").strip() or None,
+        gemini_url=(env.get("GEMINI_URL") or "").strip() or None,
+        ai_enabled=(env.get("AI_ENABLED") or "1").strip().lower() not in OFF_WORDS,
     )
 
 

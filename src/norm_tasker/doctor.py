@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from norm_tasker.ai.gemini import AiError, GeminiClient
 from norm_tasker.calendar_ru import build_calendar
 from norm_tasker.config import Env, Role, Settings
 from norm_tasker.deadlines import kp_timeline, next_month
@@ -199,6 +200,27 @@ def check_storage(env: Env, report: Report) -> None:
         report.bad(f"Каталог данных недоступен: {error}", "проверьте права на папку data")
 
 
+async def check_gemini(env: Env, report: Report) -> None:
+    if not env.gemini_key:
+        report.warn(
+            "Ключа Gemini нет: ИИ выключен",
+            "добавьте GEMINI_API — тогда бот будет отвечать на вопросы, когда его зовут по имени",
+        )
+        return
+    if not env.ai_enabled:
+        report.warn("ИИ выключен переменной AI_ENABLED", "уберите её или поставьте 1")
+        return
+    client = GeminiClient(env.gemini_key, model=env.gemini_model, base_url=env.gemini_url)
+    try:
+        await client.ping()
+    except AiError as error:
+        report.bad(
+            f"Gemini не ответил: {error}", "проверьте GEMINI_API (и GEMINI_URL, если он задан)"
+        )
+        return
+    report.ok(f"Gemini отвечает, модель {client.model}")
+
+
 async def run_doctor(env: Env, settings: Settings) -> int:
     report = Report()
     print("Проверка настроек norm_tasker\n")
@@ -207,6 +229,7 @@ async def run_doctor(env: Env, settings: Settings) -> int:
     check_calendar(env, settings, report)
     await check_telegram(env, settings, report)
     check_google(env, settings, report)
+    await check_gemini(env, report)
     print()
     if report.failed:
         print(f"Не хватает: {report.failed}. Исправьте пункты с {BAD} и запустите проверку снова.")

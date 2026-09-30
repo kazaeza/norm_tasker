@@ -3,7 +3,10 @@ from datetime import date, datetime, timedelta
 
 import pytest
 
+from ai_fixture import KEY, FakeTransport, answer, error_body
 from kp_fixture import build_kp, standard_kp
+from norm_tasker.ai.assistant import Assistant
+from norm_tasker.ai.gemini import GeminiClient
 from norm_tasker.bot.app import KP_FAILURES_BEFORE_ALERT, App
 from norm_tasker.config import Env
 from norm_tasker.google.client import GoogleError
@@ -602,3 +605,137 @@ async def test_app_starts_all_loops_and_stops_cleanly(app, session, clock, monke
     with pytest.raises(asyncio.CancelledError):
         await running
     assert all(task.cancelled() or task.done() for task in app._tasks)
+
+
+# --- ИИ: вопросы боту по имени -------------------------------------------------------------
+
+
+@pytest.fixture
+def gemini():
+    return FakeTransport()
+
+
+@pytest.fixture
+async def ai_ready(ready, gemini):
+    """Бот с подключённым (подставным) Gemini; журнал вызовов пуст."""
+    ready.ai = Assistant(GeminiClient(KEY, transport=gemini), ready.tracker)
+    ready.info.ai_configured = True
+    return ready
+
+
+async def ask_bot(app, text, who=ALPHA, **kwargs):
+    """Сообщение в чат и ожидание фонового ответа ИИ."""
+    await say(app, text, who, **kwargs)
+    await app.wait_background()
+
+
+async def test_mention_is_answered_by_gemini_from_the_tracker_data(ai_ready, session, gemini):
+    app = ai_ready
+    gemini.replies.append((200, answer("Ближайший — **пятничный** пост: №1 <тест> & всё")))
+    await ask_bot(app, "@norm_test_bot кто что делает на этой неделе?")
+    assert session.named("SendChatAction")[0]["action"] == "typing"
+    reply = session.named("SendMessage")[-1]
+    assert "<b>пятничный</b>" in reply["text"] and "&lt;тест&gt; &amp; всё" in reply["text"]
+    assert reply["reply_parameters"]["message_id"]
+    prompt = gemini.prompt()
+    assert "ВОПРОС\nкто что делает на этой неделе?" in prompt and "@norm_test_bot" not in prompt
+    assert "Сегодня: вт 29.09.2026, сейчас 10:00" in prompt
+    assert "Спрашивает: Копирайтер Альфа (копирайтер)" in prompt
+    assert "Ответственный — ответственный за проект" in prompt
+    assert f"№{friday_post(app).id} | пт 02.10" in prompt
+    assert app.info.ai_error is None and app.info.ai_model
+
+
+async def test_gemini_failure_falls_back_to_keywords_and_shows_in_status(ai_ready, session, gemini):
+    app = ai_ready
+    bad_key = error_body("INVALID_ARGUMENT", "API key not valid. Please pass a valid API key.")
+    gemini.replies.append((400, bad_key))
+    await ask_bot(app, "@norm_test_bot чё там по задачам")
+    assert "📌 Доска" in session.last_text()  # ответ как на /week
+    assert "не принял ключ" in app.info.ai_error
+    session.clear()
+    await say(app, "/status", ALPHA)
+    assert "⚠️ ИИ не отвечает: Gemini не принял ключ" in session.last_text()
+
+
+async def test_gemini_is_not_asked_without_a_mention_or_for_commands_and_reports(
+    ai_ready, session, gemini
+):
+    app = ai_ready
+    await ask_bot(app, "чё там по задачам")
+    await ask_bot(app, "/week")
+    await ask_bot(app, "@norm_test_bot беру пост на пятницу")
+    await ask_bot(app, "@norm_test_bot", BETA)  # одно обращение без вопроса: подсказка
+    assert gemini.calls == []
+    assert friday_post(app).assignee_username == "cw_alpha"
+    assert "Не понял" in session.last_text()
+
+
+async def test_gemini_questions_per_hour_are_limited(ai_ready, session, gemini, monkeypatch):
+    app = ai_ready
+    monkeypatch.setattr("norm_tasker.bot.app.AI_CALLS_PER_HOUR", 1)
+    gemini.replies.append((200, answer("Первый ответ")))
+    await ask_bot(app, "@norm_test_bot вопрос раз")
+    assert "Первый ответ" in session.last_text()
+    await ask_bot(app, "@norm_test_bot чё по задачам")  # лимит выбран: отвечают команды
+    assert "📌 Доска" in session.last_text() and len(gemini.calls) == 1
+
+
+async def test_client_comments_and_documents_are_not_sent_to_gemini(ai_ready, gemini):
+    app = ai_ready
+    app.google.docs["docC"] = [doc_comment("c1", "поправьте вторую строку")]
+    await app.poll_docs_once()
+    gemini.replies.append((200, answer("ок")))
+    await ask_bot(app, "@norm_test_bot что нового?")
+    assert "поправьте" not in gemini.prompt() and "docs.google.com" not in gemini.prompt()
+
+
+async def test_someone_outside_the_team_gets_answers_but_not_my_posts(ai_ready, session, gemini):
+    app = ai_ready
+    app.settings.unknown_role = None
+    stranger = {"user_id": 999, "username": "stranger_x", "name": "Гость"}
+    gemini.replies.append((200, answer("Есть три поста")))
+    await ask_bot(app, "@norm_test_bot что у нас на неделе?", stranger)
+    assert "Есть три поста" in session.last_text()
+    assert "Спрашивает" not in gemini.prompt()
+
+
+async def test_startup_check_reports_the_model_or_the_error(ai_ready, session, gemini):
+    app = ai_ready
+    gemini.replies.append((200, answer("ок")))
+    await app.check_ai()
+    await say(app, "/status", ALPHA)
+    assert "🧠 ИИ: Gemini, модель gemini-flash-lite-latest" in session.last_text()
+    assert app.info.ai_ok_at is not None
+    denied = error_body("PERMISSION_DENIED", "User location is not supported", 403)
+    gemini.replies.append((403, denied))
+    await app.check_ai()
+    session.clear()
+    await say(app, "/status", ALPHA)
+    assert "⚠️ ИИ не отвечает: Gemini недоступен из региона" in session.last_text()
+
+
+async def test_status_says_when_ai_is_off(ready, session):
+    await say(ready, "/status", ALPHA)
+    assert "ИИ не подключён" in session.last_text()
+
+
+def test_build_app_connects_gemini_only_with_a_key_that_is_on(tmp_path, settings):
+    from norm_tasker.bot.app import build_app
+
+    base = {
+        "bot_token": "42:TEST",
+        "data_dir": tmp_path,
+        "config_path": tmp_path / "config.yaml",
+        "google_credentials": None,
+        "kp_spreadsheet_id": None,
+        "tracker_spreadsheet_id": None,
+    }
+    assert build_app(Env(**base), settings).ai is None
+    assert build_app(Env(**base, gemini_key=KEY, ai_enabled=False), settings).ai is None
+    app = build_app(
+        Env(**base, gemini_key=KEY, gemini_model="my-model", gemini_url="https://proxy.example"),
+        settings,
+    )
+    assert app.ai is not None and app.info.ai_configured
+    assert app.ai.client.model == "my-model" and app.ai.client.base_url == "https://proxy.example"

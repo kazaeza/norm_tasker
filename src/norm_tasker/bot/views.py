@@ -74,6 +74,10 @@ class RuntimeInfo:
     warnings: list[str] = field(default_factory=list)
     google_configured: bool = False
     tracker_copy_configured: bool = False
+    ai_configured: bool = False  # есть ключ Gemini и ИИ не выключен
+    ai_model: str | None = None
+    ai_ok_at: datetime | None = None  # когда Gemini отвечал в последний раз
+    ai_error: str | None = None  # чем кончилась последняя попытка, если неудачей
 
 
 def help_reply() -> Reply:
@@ -344,7 +348,15 @@ def status_view(tracker: Tracker, info: RuntimeInfo, chat_ok: bool) -> Reply:
     if soft_mode(tracker, now):
         started = tracker.state.get_meta("first_run")
         lines.append(f"Мягкий старт: только саммари и доска (с {started or 'первого запуска'})")
-    lines.append("ИИ не подключён: понимаю кнопки и типовые фразы")
+    if info.ai_configured:
+        model = f", модель {escape(info.ai_model)}" if info.ai_model else ""
+        lines.append(f"🧠 ИИ: Gemini{model}. Отвечает на вопросы, когда меня зовут по имени")
+        if info.ai_error:
+            lines.append(f"⚠️ ИИ не отвечает: {escape(info.ai_error)}")
+        elif info.ai_ok_at:
+            lines.append(f"ИИ отвечал {info.ai_ok_at:%d.%m %H:%M}")
+    else:
+        lines.append("ИИ не подключён: понимаю кнопки и типовые фразы")
     lines.extend(f"⚠️ {escape(w)}" for w in info.warnings[:5])
     return Reply("\n".join(lines))
 
