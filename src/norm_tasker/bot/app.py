@@ -464,7 +464,7 @@ def build_app(env: Env, settings: Settings) -> App:
     if not env.bot_token:
         raise SystemExit(
             "Не задан BOT_TOKEN: возьмите токен у @BotFather и положите в .env "
-            "(на Railway — в Variables)"
+            "(в облачном хостинге — в переменные проекта)"
         )
     calendar = build_calendar(
         env.data_dir / "calendar_cache.json", settings.extra_days_off, settings.extra_workdays

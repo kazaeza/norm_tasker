@@ -67,7 +67,7 @@ YAML_TEXT = "chat_id: -1001\nteam:\n  - {name: Первый, username: first, ro
 
 
 def test_settings_can_come_from_the_environment_instead_of_a_file(tmp_path):
-    """На хостингах без файлов (Railway) настройки лежат в переменной CONFIG_YAML."""
+    """В облачных хостингах без файлов настройки лежат в переменной CONFIG_YAML."""
     env = load_env({"DATA_DIR": str(tmp_path), "CONFIG_YAML": YAML_TEXT})
     assert env.has_config
     settings = load_settings_for(env)

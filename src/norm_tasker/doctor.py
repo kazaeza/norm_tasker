@@ -39,7 +39,7 @@ async def check_telegram(env: Env, settings: Settings, report: Report) -> None:
     if not env.bot_token:
         report.bad(
             "BOT_TOKEN не задан",
-            "создайте бота у @BotFather и положите токен в .env (на Railway — в Variables)",
+            "создайте бота у @BotFather и положите токен в .env (в облаке — в переменные проекта)",
         )
         return
     bot = Api(env.bot_token, base_url=env.telegram_api_url or API_URL)

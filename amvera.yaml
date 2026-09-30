@@ -1,0 +1,12 @@
+# Настройки запуска на Amvera Cloud: собрать образ из Dockerfile, а папку /data сохранять
+# между перезапусками (там база бота). Без этого файла Amvera тоже нашла бы Dockerfile,
+# но путь к данным лучше задать явно: он должен совпадать с DATA_DIR из Dockerfile.
+# Подробности — docs/SETUP.md, раздел «Вариант А. Amvera Cloud».
+meta:
+  environment: docker
+  toolchain:
+    name: docker
+build:
+  dockerfile: Dockerfile
+run:
+  persistenceMount: /data
