@@ -1,6 +1,6 @@
 import pytest
 
-from norm_tasker.chat.asks import addressed_to, classify_ask
+from norm_tasker.chat.asks import addressed_to, classify_ask, is_acknowledgement
 
 
 @pytest.mark.parametrize(
@@ -42,3 +42,10 @@ def test_addressed_to_matches_only_our_name():
     assert not addressed_to("привет", "norm_bot")
     assert not addressed_to("@norm_bot", None)
     assert not addressed_to(None, "norm_bot")
+
+
+def test_acknowledgements_are_not_questions():
+    for text in ("спасибо", "Спасибо большое!", "ок", "окей, понял", "👍", "+", "thanks"):
+        assert is_acknowledgement(text), text
+    for text in ("спасибо, а когда срок?", "ок?", "готово", "не понял", "1", "", None):
+        assert not is_acknowledgement(text), text

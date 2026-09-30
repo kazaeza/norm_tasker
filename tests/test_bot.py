@@ -329,6 +329,61 @@ async def test_report_with_a_mention_is_still_a_report(ready, session):
     assert "Не понял" not in session.last_text()
 
 
+# --- ответы на сообщения бота ---------------------------------------------------------------
+
+
+def linked_bot_message(app, post, message_id=777):
+    """Сообщение бота о посте: на него отвечают, а бот помнит, о каком посте оно."""
+    now = app.tracker.now()
+    app.tracker.state.remember_message(WORK_CHAT, message_id, "confirm", [post.id], now)
+    return bot_message(message_id)
+
+
+async def test_reply_to_the_bot_is_a_call_to_the_bot(ready, session):
+    app = ready
+    for text, marker in [
+        ("что горит сегодня", "☀️"),
+        ("чё там по задачам?", "📌 Доска"),
+        ("а какие свободные посты?", "Без ответственного"),
+    ]:
+        session.clear()
+        await say(app, text, ALPHA, reply_to=bot_message(777))
+        assert marker in session.last_text(), text
+    session.clear()
+    await say(app, "как погода?", ALPHA, reply_to=bot_message(777))
+    assert "Не понял" in session.last_text()
+    assert session.named("SendMessage")[-1]["reply_parameters"]["message_id"]
+
+
+async def test_reply_report_is_still_a_report_and_thanks_get_no_answer(ready, session):
+    app = ready
+    post = friday_post(app)
+    await say(app, "беру", BETA, reply_to=linked_bot_message(app, post))
+    assert app.tracker.get(post.id).assignee_username == "cw_beta"
+    session.clear()
+    for text in ("спасибо", "Спасибо большое!", "ок", "👍", "понял, спасибо"):
+        await say(app, text, ALPHA, reply_to=bot_message(777))
+    assert session.named("SendMessage") == []
+
+
+async def test_only_replies_to_our_own_messages_count(ready, session):
+    app = ready
+    colleague = Message(
+        message_id=888,
+        chat=Chat(id=WORK_CHAT, type="supergroup"),
+        from_user=make_user(102, "cw_beta", "Бета"),
+        text="кто взял пост?",
+    )
+    await say(app, "чё там по задачам", ALPHA, reply_to=colleague)
+    # Ответ другого бота на наше сообщение: бот с ботами не переписывается.
+    update = text_update(
+        "чё там по задачам", user_id=555, username="other_bot", reply_to=bot_message(777)
+    )
+    update.message.from_user.is_bot = True
+    await feed(app, update)
+    assert session.named("SendMessage") == []
+
+
 async def test_stranger_gets_read_only_answers(ready, session):
     app = ready
     app.settings.unknown_role = None  # людей вне списка команды бот не считает участниками
@@ -679,6 +734,45 @@ async def test_gemini_questions_per_hour_are_limited(ai_ready, session, gemini, 
     assert "Первый ответ" in session.last_text()
     await ask_bot(app, "@norm_test_bot чё по задачам")  # лимит выбран: отвечают команды
     assert "📌 Доска" in session.last_text() and len(gemini.calls) == 1
+
+
+async def test_reply_to_the_bot_is_answered_by_gemini_about_that_post(ai_ready, session, gemini):
+    app = ai_ready
+    post = friday_post(app)
+    replied = linked_bot_message(app, post)
+    replied.text = "ТЕКСТ_СООБЩЕНИЯ_БОТА_НЕ_УХОДИТ_В_GEMINI"
+    gemini.replies.append((200, answer("Срок — до среды")))
+    await ask_bot(app, "а когда срок?", reply_to=replied)
+    assert "Срок — до среды" in session.last_text()
+    assert session.named("SendMessage")[-1]["reply_parameters"]["message_id"]
+    prompt = gemini.prompt()
+    assert "ВОПРОС\nа когда срок?" in prompt
+    focus = prompt.split("Вопрос задан в ответ на сообщение бота")[1]
+    assert f"№{post.id} | пт 02.10" in focus
+    assert "ТЕКСТ_СООБЩЕНИЯ_БОТА" not in prompt  # называем посты, а не пересказываем сообщение
+    # Сообщение, о постах которого бот не помнит: блока нет.
+    gemini.replies.append((200, answer("ок")))
+    await ask_bot(app, "что нового?", reply_to=bot_message(778))
+    assert "Вопрос задан в ответ" not in gemini.prompt()
+
+
+async def test_thanks_in_reply_are_not_sent_to_gemini(ai_ready, session, gemini):
+    await ask_bot(ai_ready, "спасибо!", reply_to=bot_message(777))
+    assert gemini.calls == [] and session.named("SendMessage") == []
+
+
+async def test_reply_to_a_long_list_is_not_about_one_post(ai_ready, gemini, monkeypatch):
+    app = ai_ready
+    monkeypatch.setattr("norm_tasker.ai.assistant.MAX_FOCUS", 1)
+    first, second = app.tracker.open_posts(app.tracker.today())[:2]
+    now = app.tracker.now()
+    app.tracker.state.remember_message(WORK_CHAT, 780, "free", [first.id, second.id], now)
+    app.tracker.state.remember_message(WORK_CHAT, 781, "confirm", [first.id], now)
+    gemini.replies.extend([(200, answer("ок")), (200, answer("ок"))])
+    await ask_bot(app, "что тут?", reply_to=bot_message(780))
+    assert "Вопрос задан в ответ" not in gemini.prompt()
+    await ask_bot(app, "что тут?", reply_to=bot_message(781))
+    assert "Вопрос задан в ответ" in gemini.prompt()
 
 
 async def test_client_comments_and_documents_are_not_sent_to_gemini(ai_ready, gemini):

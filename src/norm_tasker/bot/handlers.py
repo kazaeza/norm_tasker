@@ -12,7 +12,7 @@ from norm_tasker.ai.gemini import AiError
 from norm_tasker.bot import views
 from norm_tasker.bot.telegram import message_link
 from norm_tasker.chat.actions import handle_callback, handle_message
-from norm_tasker.chat.asks import addressed_to, classify_ask
+from norm_tasker.chat.asks import addressed_to, classify_ask, is_acknowledgement
 from norm_tasker.config import Role
 from norm_tasker.digest.board import build_board
 from norm_tasker.reply import Reply
@@ -218,11 +218,34 @@ class Handlers:
         text = message.text or message.caption or ""
         if actor is not None and await self.on_report(message, actor, text):
             return
-        if addressed_to(text, self.app.bot_username):
+        if addressed_to(text, self.app.bot_username) or self.talks_to_bot(message, text):
             await self.on_mention(message, actor, text)
 
+    def replies_to_bot(self, message: Message) -> bool:
+        """Сообщение — ответ на одно из сообщений самого бота."""
+        replied = message.reply_to_message
+        return (
+            replied is not None
+            and replied.from_user is not None
+            and replied.from_user.id == self.app.bot_id
+        )
+
+    def talks_to_bot(self, message: Message, text: str) -> bool:
+        """Человек ответил на сообщение бота: это обращение к боту, если не просто «спасибо»."""
+        user = message.from_user
+        if user is None or user.is_bot:
+            return False  # другие боты и анонимные админы: с ними бот не переписывается
+        return self.replies_to_bot(message) and not is_acknowledgement(text)
+
+    def replied_posts(self, message: Message) -> list[int]:
+        """Посты из сообщения бота, на которое ответили; пусто, если ответ не на такое."""
+        replied = message.reply_to_message
+        if replied is None or not self.replies_to_bot(message):
+            return []
+        return self.tracker.state.message_posts(message.chat.id, replied.message_id) or []
+
     async def on_mention(self, message: Message, actor: Actor | None, text: str) -> None:
-        """Бота позвали по имени, а фраза не похожа на отчёт о посте: отвечаем, а не молчим."""
+        """К боту обратились, а фраза не похожа на отчёт о посте: отвечаем, а не молчим."""
         question = ask_text(text, self.app.bot_username)
         if question and self.app.ai_allowed():
             self.app.spawn(self.answer_with_ai(message, actor, question, text))
@@ -238,7 +261,9 @@ class Handlers:
         with contextlib.suppress(TelegramError):
             await app.bot.send_chat_action(message.chat.id, "typing", self.thread_of(message))
         try:
-            answer = await app.ai.answer(question, actor, app.parsed_kp)
+            answer = await app.ai.answer(
+                question, actor, app.parsed_kp, focus_ids=self.replied_posts(message)
+            )
         except AiError as error:
             app.ai_failed(error)
         except Exception as error:
@@ -263,11 +288,7 @@ class Handlers:
         """Отчёт команды о постах. False — бот ничего не понял или не нашёл, что ответить."""
         reply_post_ids = None
         replied = message.reply_to_message
-        if (
-            replied is not None
-            and replied.from_user is not None
-            and replied.from_user.id == self.app.bot_id
-        ):
+        if replied is not None and self.replies_to_bot(message):
             reply_post_ids = self.tracker.state.message_posts(message.chat.id, replied.message_id)
         try:
             reply = handle_message(

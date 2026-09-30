@@ -24,6 +24,7 @@ from norm_tasker.tracker.stages import LABEL, NEXT_STEP, Stage
 BACK_DAYS = 3  # недавно вышедшие и пропущенные посты
 AHEAD_DAYS = 21
 MAX_POSTS = 60
+MAX_FOCUS = 8  # ответ на сообщение бота о таком числе постов или меньше считаем вопросом о них
 MAX_QUESTION = 600
 ROLE_NAMES = {
     Role.COPYWRITER: "копирайтер",
@@ -43,7 +44,11 @@ SYSTEM = """Ты — бот SMM-команды, которая ведёт пос
 - Не используй разметку Markdown: без звёздочек, решёток и обратных кавычек. Перечисление начинай \
 строками с «• ».
 - Ты ничего не меняешь в трекере. Чтобы взять пост или сдвинуть этап, человек пишет в чат обычной \
-фразой, например «беру пост на пятницу» или «текст готов, отправил клиенту».
+фразой, например «беру пост на пятницу» или «текст готов, отправил клиенту». Если человек \
+сообщает, что сделал, а бот этого не записал («готово», «отправил»), подскажи точную фразу для \
+записи с номером поста.
+- Если в данных есть блок «Вопрос задан в ответ на сообщение бота», вопрос относится именно к \
+этим постам: «когда срок?» значит срок этих постов.
 - Команды бота: /week, /today, /my, /free, /design, /kp, /board, /post 12, /help.
 - Если вопрос не про посты и работу команды, вежливо скажи, что помогаешь только с постами."""
 
@@ -69,7 +74,12 @@ def _post_line(tracker: Tracker, post: Post, now: datetime) -> str:
     return line
 
 
-def build_snapshot(tracker: Tracker, parsed_kp: KpParseResult | None, asker: Actor | None) -> str:
+def build_snapshot(
+    tracker: Tracker,
+    parsed_kp: KpParseResult | None,
+    asker: Actor | None,
+    focus_ids: list[int] | None = None,
+) -> str:
     now = tracker.now()
     today = now.date()
     zone = tracker.settings.timezone
@@ -108,6 +118,15 @@ def build_snapshot(tracker: Tracker, parsed_kp: KpParseResult | None, asker: Act
     if plan:
         lines.append("")
         lines.append(plan)
+
+    # Ответ на сообщение бота: называем только посты, из текста сообщения ничего не берём.
+    # Ответ на длинный список ни к какому посту не привязан, он и так есть в сводке выше.
+    few = focus_ids if focus_ids and len(focus_ids) <= MAX_FOCUS else []
+    focus = [p for p in tracker.by_ids(few) if not p.cancelled]
+    if focus:
+        lines.append("")
+        lines.append("Вопрос задан в ответ на сообщение бота, в котором речь шла об этих постах:")
+        lines.extend(_post_line(tracker, post, now) for post in focus)
     return "\n".join(lines)
 
 
@@ -129,9 +148,13 @@ class Assistant:
         return self.client.model
 
     async def answer(
-        self, question: str, asker: Actor | None, parsed_kp: KpParseResult | None
+        self,
+        question: str,
+        asker: Actor | None,
+        parsed_kp: KpParseResult | None,
+        focus_ids: list[int] | None = None,
     ) -> str:
-        snapshot = build_snapshot(self.tracker, parsed_kp, asker)
+        snapshot = build_snapshot(self.tracker, parsed_kp, asker, focus_ids)
         text = await self.client.ask(SYSTEM, f"ДАННЫЕ\n{snapshot}\n\nВОПРОС\n{question}")
         return to_html(text)
 
